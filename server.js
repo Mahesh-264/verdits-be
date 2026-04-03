@@ -83,6 +83,7 @@ app.use((req, res, next) => {
 
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/chat', require('./routes/chatRoutes')); 
+app.use('/api/appointments', require('./routes/appointmentRoutes'));
 
 app.use((err, req, res, next) => {
     console.error("❌ SERVER CRASH PREVENTED ❌");
