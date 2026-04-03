@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
 
 const generateTokens = (id, role) => {
@@ -11,16 +12,23 @@ const generateTokens = (id, role) => {
 // 1. REGISTER
 exports.register = async (req, res) => {
   try {
-    const { name, phone, password, role, address, barId, specialization, experienceYears, about, languages, consultationFee } = req.body;
+    const { firstName, lastName, email, phone, password, role, address, barId, specialization, experienceYears, about, languages, consultationFee, collegeName, collegeEmail, otp } = req.body;
     
-    if (await User.findOne({ phone })) return res.status(400).json({ message: 'Phone exists' });
+    if (phone && await User.findOne({ phone })) return res.status(400).json({ message: 'Phone exists' });
+    if (email && await User.findOne({ email })) return res.status(400).json({ message: 'Email exists' });
 
-    const userData = { name, phone, password, role, address };
+    // Removed OTP validation for User and Student as per requirement
+
+    const userData = { firstName, lastName, email, phone, password, role, address };
     
     if (role === 'lawyer') {
       userData.lawyerProfile = { 
         barId, specialization, experienceYears, about, languages, consultationFee,
         isVerified: false 
+      };
+    } else if (role === 'student') {
+      userData.studentProfile = {
+        collegeName, collegeEmail
       };
     }
     
@@ -38,9 +46,15 @@ exports.register = async (req, res) => {
 // 2. LOGIN
 exports.login = async (req, res) => {
   try {
-    console.log("🚀 Login request:", req.body.phone);
-    const { phone, password } = req.body;
-    const user = await User.findOne({ phone }).select('+password');
+    const { email, phone, password } = req.body;
+    let user;
+    if (email) {
+      console.log("🚀 Login request:", email);
+      user = await User.findOne({ email }).select('+password');
+    } else if (phone) {
+      console.log("🚀 Login request:", phone);
+      user = await User.findOne({ phone }).select('+password');
+    }
     
     if (!user || !(await user.matchPassword(password))) {
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -52,21 +66,27 @@ exports.login = async (req, res) => {
 
     res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
     console.log("✅ Login Successful.");
-    res.json({ accessToken, user }); // Simplified response
+    res.json({ accessToken, user });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 // 3. SEND OTP
 exports.sendOTP = async (req, res) => {
   try {
+    const { phone, isRegister } = req.body;
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const user = await User.findOneAndUpdate(
-      { phone: req.body.phone },
-      { otp, otpExpires: Date.now() + 600000 },
-      { new: true }
-    );
-    if (!user) return res.status(404).json({ message: "User not found" });
-    console.log(`📡 OTP for ${req.body.phone}: ${otp}`);
+    console.log(`📡 OTP for ${phone}: ${otp}`);
+
+    if (isRegister) {
+       await Otp.findOneAndUpdate({ phone }, { otp }, { upsert: true, new: true });
+    } else {
+      const user = await User.findOneAndUpdate(
+        { phone },
+        { otp, otpExpires: Date.now() + 600000 },
+        { new: true }
+      );
+      if (!user) return res.status(404).json({ message: "User not found" });
+    }
     res.json({ message: "OTP sent" });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
@@ -147,7 +167,8 @@ exports.updateProfile = async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Update Basic Fields
-    if (req.body.name) user.name = req.body.name;
+    if (req.body.firstName) user.firstName = req.body.firstName;
+    if (req.body.lastName) user.lastName = req.body.lastName;
     if (req.body.email) user.email = req.body.email;
     if (req.body.age) user.age = req.body.age;
     if (req.body.gender) user.gender = req.body.gender;

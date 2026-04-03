@@ -2,11 +2,13 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const userSchema = new mongoose.Schema({
-  name: { type: String, required: true }, // Added field
+  firstName: { type: String, required: true },
+  lastName: { type: String, required: true },
+  email: { type: String, unique: true, sparse: true },
   phone: { type: String, unique: true, required: true },
-  password: { type: String, required: true, select: false },
-  role: { type: String, enum: ['user', 'lawyer', 'admin'], default: 'user' },
-  profileImage: { type: String, default: "" }, // Added for lawyer photo
+  password: { type: String, required: false, select: false }, // optional for pure OTP users
+  role: { type: String, enum: ['user', 'lawyer', 'student', 'admin'], default: 'user' },
+  profileImage: { type: String, default: "" },
   address: {
     latitude: Number,
     longitude: Number,
@@ -30,9 +32,20 @@ const userSchema = new mongoose.Schema({
     consultationFee: { type: Number, default: 500 }, // Added fee
     isVerified: { type: Boolean, default: false }
   },
+  studentProfile: {
+    collegeName: String,
+    collegeEmail: String
+  }
 }, { timestamps: true });
 
+// Virtual for full name
+userSchema.virtual('name').get(function() {
+  return `${this.firstName} ${this.lastName}`;
+});
 
+// Ensure virtuals are included in JSON and Object output
+userSchema.set('toJSON', { virtuals: true });
+userSchema.set('toObject', { virtuals: true });
 
 // Hash password before saving
 userSchema.pre('save', async function() {
