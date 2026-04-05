@@ -34,7 +34,23 @@ const userSchema = new mongoose.Schema({
   },
   studentProfile: {
     collegeName: String,
-    collegeEmail: String
+    collegeEmail: String,
+    bio: String,
+    currentYear: String,
+    specializations: [String],
+    skills: [String],
+    internships: [
+      {
+        role: String,
+        org: String,
+        period: String,
+        description: String,
+      }
+    ],
+    followingLawyers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    connectedStudents: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    connectionRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    outgoingConnectionRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
   }
 }, { timestamps: true });
 

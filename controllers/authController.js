@@ -126,8 +126,8 @@ exports.getLawyers = async (req, res) => {
   try {
     const { district, specialization } = req.query;
     
-    // Base Query: Must be a lawyer
-    let query = { role: 'lawyer' }; 
+    // Base Query: Must be a registered lawyer
+    let query = { role: 'lawyer' };
 
     // Filter by District
     if (district) query['address.district'] = district;
@@ -145,7 +145,218 @@ exports.getLawyers = async (req, res) => {
   }
 };
 
-// 7. GET LAWYER BY ID (Profile View)
+// 7. GET REGISTERED STUDENTS
+exports.getStudents = async (req, res) => {
+  try {
+    const excludeId = req.user?._id;
+    const query = { role: 'student' };
+
+    if (excludeId) query._id = { $ne: excludeId };
+
+    const students = await User.find(query)
+      .select('-password -refreshToken -otp')
+      .sort({ createdAt: -1 });
+
+    res.json(students);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 7A. GET CURRENT USER
+exports.getCurrentUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('-password -refreshToken -otp');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 8. FOLLOW OR UNFOLLOW LAWYER (Student Only)
+exports.toggleFollowLawyer = async (req, res) => {
+  try {
+    const student = await User.findById(req.user._id);
+    const lawyer = await User.findById(req.params.id);
+
+    if (!student || student.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can follow lawyers' });
+    }
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(404).json({ message: 'Lawyer not found' });
+    }
+
+    if (!student.studentProfile) student.studentProfile = {};
+    if (!Array.isArray(student.studentProfile.followingLawyers)) {
+      student.studentProfile.followingLawyers = [];
+    }
+
+    const lawyerId = String(lawyer._id);
+    const alreadyFollowing = student.studentProfile.followingLawyers.some(
+      (id) => String(id) === lawyerId
+    );
+
+    if (alreadyFollowing) {
+      student.studentProfile.followingLawyers = student.studentProfile.followingLawyers.filter(
+        (id) => String(id) !== lawyerId
+      );
+    } else {
+      student.studentProfile.followingLawyers.push(lawyer._id);
+    }
+
+    student.markModified('studentProfile');
+    await student.save();
+
+    res.json({
+      message: alreadyFollowing ? 'Lawyer unfollowed' : 'Lawyer followed',
+      user: student.toObject(),
+      isFollowing: !alreadyFollowing,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 9. SEND STUDENT CONNECTION REQUEST
+exports.sendStudentConnectionRequest = async (req, res) => {
+  try {
+    const student = await User.findById(req.user._id);
+    const targetStudent = await User.findById(req.params.id);
+
+    if (!student || student.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can connect with students' });
+    }
+
+    if (!targetStudent || targetStudent.role !== 'student') {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+
+    if (String(student._id) === String(targetStudent._id)) {
+      return res.status(400).json({ message: 'You cannot connect with yourself' });
+    }
+
+    if (!student.studentProfile) student.studentProfile = {};
+    if (!targetStudent.studentProfile) targetStudent.studentProfile = {};
+    if (!Array.isArray(student.studentProfile.connectedStudents)) {
+      student.studentProfile.connectedStudents = [];
+    }
+    if (!Array.isArray(student.studentProfile.outgoingConnectionRequests)) {
+      student.studentProfile.outgoingConnectionRequests = [];
+    }
+    if (!Array.isArray(targetStudent.studentProfile.connectionRequests)) {
+      targetStudent.studentProfile.connectionRequests = [];
+    }
+
+    const targetId = String(targetStudent._id);
+    const alreadyConnected = student.studentProfile.connectedStudents.some(
+      (id) => String(id) === targetId
+    );
+
+    if (alreadyConnected) {
+      return res.status(400).json({ message: 'Already connected' });
+    }
+
+    const alreadyRequested = student.studentProfile.outgoingConnectionRequests.some(
+      (id) => String(id) === targetId
+    );
+
+    if (alreadyRequested) {
+      return res.status(400).json({ message: 'Request already sent' });
+    }
+
+    const incomingFromTarget = student.studentProfile.connectionRequests?.some(
+      (id) => String(id) === targetId
+    );
+
+    if (incomingFromTarget) {
+      return res.status(400).json({ message: 'This student has already sent you a request. Accept it instead.' });
+    }
+
+    student.studentProfile.outgoingConnectionRequests.push(targetStudent._id);
+    targetStudent.studentProfile.connectionRequests.push(student._id);
+
+    student.markModified('studentProfile');
+    targetStudent.markModified('studentProfile');
+    await student.save();
+    await targetStudent.save();
+
+    res.json({
+      message: 'Connection request sent',
+      user: student.toObject(),
+      requestSent: true,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 10. ACCEPT STUDENT CONNECTION REQUEST
+exports.acceptStudentConnectionRequest = async (req, res) => {
+  try {
+    const student = await User.findById(req.user._id);
+    const requester = await User.findById(req.params.id);
+
+    if (!student || student.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can accept requests' });
+    }
+
+    if (!requester || requester.role !== 'student') {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+
+    if (!student.studentProfile) student.studentProfile = {};
+    if (!requester.studentProfile) requester.studentProfile = {};
+
+    student.studentProfile.connectionRequests = student.studentProfile.connectionRequests || [];
+    student.studentProfile.connectedStudents = student.studentProfile.connectedStudents || [];
+    requester.studentProfile.connectedStudents = requester.studentProfile.connectedStudents || [];
+    requester.studentProfile.outgoingConnectionRequests = requester.studentProfile.outgoingConnectionRequests || [];
+
+    const requesterId = String(requester._id);
+    const hasIncomingRequest = student.studentProfile.connectionRequests.some(
+      (id) => String(id) === requesterId
+    );
+
+    if (!hasIncomingRequest) {
+      return res.status(400).json({ message: 'No pending request from this student' });
+    }
+
+    student.studentProfile.connectionRequests = student.studentProfile.connectionRequests.filter(
+      (id) => String(id) !== requesterId
+    );
+
+    if (!student.studentProfile.connectedStudents.some((id) => String(id) === requesterId)) {
+      student.studentProfile.connectedStudents.push(requester._id);
+    }
+
+    requester.studentProfile.outgoingConnectionRequests = requester.studentProfile.outgoingConnectionRequests.filter(
+      (id) => String(id) !== String(student._id)
+    );
+
+    if (!requester.studentProfile.connectedStudents.some((id) => String(id) === String(student._id))) {
+      requester.studentProfile.connectedStudents.push(student._id);
+    }
+
+    student.markModified('studentProfile');
+    requester.markModified('studentProfile');
+    await student.save();
+    await requester.save();
+
+    res.json({
+      message: 'Connection request accepted',
+      user: student.toObject(),
+      accepted: true,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 11. GET LAWYER BY ID (Profile View)
 exports.getLawyerById = async (req, res) => {
   try {
     const lawyer = await User.findById(req.params.id).select('-password -refreshToken -otp');
@@ -158,7 +369,7 @@ exports.getLawyerById = async (req, res) => {
   }
 };
 
-// 8. UPDATE PROFILE (User & Lawyer)
+// 12. UPDATE PROFILE (User & Lawyer)
 exports.updateProfile = async (req, res) => {
   try {
     // Note: We use findById to ensure we get the Mongoose document instance
@@ -187,6 +398,14 @@ exports.updateProfile = async (req, res) => {
       };
     }
 
+    // Update Student Specifics
+    if (req.body.studentProfile && user.role === 'student') {
+      user.studentProfile = {
+        ...user.studentProfile,
+        ...req.body.studentProfile,
+      };
+    }
+
     await user.save();
     console.log(`🔄 Profile updated for: ${user.phone}`);
     res.json({ message: "Updated", user });
@@ -195,7 +414,7 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-// 9. VERIFY LAWYER (Admin Only)
+// 13. VERIFY LAWYER (Admin Only)
 exports.verifyLawyer = async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(req.params.id, { 'lawyerProfile.isVerified': req.body.isVerified }, { new: true });
