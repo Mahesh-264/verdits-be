@@ -29,6 +29,16 @@ const normalizeStatus = (status) => {
 router.post('/', async (req, res) => {
   const { userId, lawyerId } = req.body;
 
+  const existingAppointment = await Appointment.findOne({
+    userId,
+    lawyerId
+  });
+
+  if (existingAppointment) {
+    const populatedExistingAppointment = await Appointment.findById(existingAppointment._id).populate(populateAppointment);
+    return res.json(populatedExistingAppointment);
+  }
+
   const appointment = await Appointment.create({
     userId,
     lawyerId
