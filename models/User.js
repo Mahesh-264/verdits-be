@@ -30,7 +30,29 @@ const userSchema = new mongoose.Schema({
     casesHandled: { type: Number, default: 0 }, // Added for UI
     languages: [String], // e.g., ["Hindi", "English"]
     consultationFee: { type: Number, default: 500 }, // Added fee
-    isVerified: { type: Boolean, default: false }
+    isVerified: { type: Boolean, default: false },
+    internships: [
+      {
+        title: String,
+        firm: String,
+        specialization: [String],
+        description: String,
+        duration: String,
+        location: String,
+        stipend: String,
+        skills: [String],
+        createdAt: { type: Date, default: Date.now },
+      }
+    ],
+    jamSessions: [
+      {
+        title: String,
+        topic: String,
+        summary: String,
+        schedule: String,
+        createdAt: { type: Date, default: Date.now },
+      }
+    ]
   },
   studentProfile: {
     collegeName: String,

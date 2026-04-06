@@ -2,6 +2,48 @@ const User = require('../models/User');
 const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
 
+const sanitizeUser = '-password -refreshToken -otp';
+
+const getDisplayName = (user) => {
+  if (!user) return 'Lawyer';
+  return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'Lawyer';
+};
+
+const formatPublishedInternship = (lawyer, internship) => ({
+  id: internship._id,
+  lawyerId: lawyer._id,
+  lawyerName: getDisplayName(lawyer),
+  profileImage: lawyer.profileImage || '',
+  avatar: getDisplayName(lawyer).charAt(0).toUpperCase(),
+  title: internship.title || 'Internship',
+  firm: internship.firm || lawyer.address?.city || lawyer.address?.district || 'Lawin',
+  specialization: internship.specialization || [],
+  description: internship.description || '',
+  duration: internship.duration || 'Not specified',
+  location: internship.location || lawyer.address?.city || lawyer.address?.district || 'Not specified',
+  stipend: internship.stipend || 'Not specified',
+  skills: internship.skills || [],
+  createdAt: internship.createdAt,
+  postedAt: internship.createdAt ? `Posted ${new Date(internship.createdAt).toLocaleDateString()}` : 'Recently posted',
+});
+
+const formatPublishedJamSession = (lawyer, session) => ({
+  id: session._id,
+  lawyerId: lawyer._id,
+  author: getDisplayName(lawyer),
+  profileImage: lawyer.profileImage || '',
+  avatar: getDisplayName(lawyer).charAt(0).toUpperCase(),
+  title: session.title || 'Jam Session',
+  topic: session.topic || 'General Discussion',
+  summary: session.summary || '',
+  schedule: session.schedule || '',
+  createdAt: session.createdAt,
+  time: session.createdAt ? new Date(session.createdAt).toLocaleDateString() : 'Recently posted',
+  meta: lawyer.lawyerProfile?.specialization || 'Lawyer',
+  participants: 'Open for students',
+  comments: '0 comments',
+});
+
 const generateTokens = (id, role) => {
   console.log(`🎫 Tokens requested for: ${id} [${role}]`);
   const accessToken = jwt.sign({ id, role }, process.env.JWT_SECRET, { expiresIn: '15m' });
@@ -138,7 +180,7 @@ exports.getLawyers = async (req, res) => {
         query['lawyerProfile.specialization'] = { $regex: specialization, $options: 'i' };
     }
     
-    const lawyers = await User.find(query).select('-password -refreshToken -otp');
+    const lawyers = await User.find(query).select(sanitizeUser);
     res.json(lawyers);
   } catch (error) { 
     res.status(500).json({ message: error.message }); 
@@ -154,7 +196,7 @@ exports.getStudents = async (req, res) => {
     if (excludeId) query._id = { $ne: excludeId };
 
     const students = await User.find(query)
-      .select('-password -refreshToken -otp')
+      .select(sanitizeUser)
       .sort({ createdAt: -1 });
 
     res.json(students);
@@ -166,7 +208,7 @@ exports.getStudents = async (req, res) => {
 // 7A. GET CURRENT USER
 exports.getCurrentUser = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('-password -refreshToken -otp');
+    const user = await User.findById(req.user._id).select(sanitizeUser);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -359,7 +401,7 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
 // 11. GET LAWYER BY ID (Profile View)
 exports.getLawyerById = async (req, res) => {
   try {
-    const lawyer = await User.findById(req.params.id).select('-password -refreshToken -otp');
+    const lawyer = await User.findById(req.params.id).select(sanitizeUser);
     if (!lawyer || lawyer.role !== 'lawyer') {
       return res.status(404).json({ message: "Lawyer not found" });
     }
@@ -414,7 +456,158 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
-// 13. VERIFY LAWYER (Admin Only)
+// 13. GET CURRENT LAWYER STUDENT INTERACTION POSTS
+exports.getLawyerStudentInteractions = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id).select(sanitizeUser);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can access student interactions' });
+    }
+
+    const internships = (lawyer.lawyerProfile?.internships || [])
+      .slice()
+      .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
+      .map((internship) => formatPublishedInternship(lawyer, internship));
+
+    const jamSessions = (lawyer.lawyerProfile?.jamSessions || [])
+      .slice()
+      .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
+      .map((session) => formatPublishedJamSession(lawyer, session));
+
+    res.json({ internships, jamSessions });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 14. CREATE LAWYER INTERNSHIP POST
+exports.createLawyerInternship = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can publish internships' });
+    }
+
+    const internship = {
+      title: req.body.title?.trim(),
+      firm: req.body.firm?.trim(),
+      specialization: Array.isArray(req.body.specialization)
+        ? req.body.specialization.map((item) => String(item).trim()).filter(Boolean)
+        : [],
+      description: req.body.description?.trim(),
+      duration: req.body.duration?.trim(),
+      location: req.body.location?.trim(),
+      stipend: req.body.stipend?.trim(),
+      skills: Array.isArray(req.body.skills)
+        ? req.body.skills.map((item) => String(item).trim()).filter(Boolean)
+        : [],
+    };
+
+    if (!internship.title || !internship.description) {
+      return res.status(400).json({ message: 'Title and description are required' });
+    }
+
+    const currentProfile = lawyer.lawyerProfile?.toObject
+      ? lawyer.lawyerProfile.toObject()
+      : (lawyer.lawyerProfile || {});
+    const currentInternships = Array.isArray(currentProfile.internships) ? currentProfile.internships : [];
+
+    lawyer.set('lawyerProfile', {
+      ...currentProfile,
+      internships: [internship, ...currentInternships],
+    });
+
+    await lawyer.save();
+
+    const savedInternship = lawyer.lawyerProfile?.internships?.[0];
+    res.status(201).json({
+      message: 'Internship published',
+      internship: formatPublishedInternship(lawyer, savedInternship),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 15. CREATE LAWYER JAM SESSION POST
+exports.createLawyerJamSession = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can publish jam sessions' });
+    }
+
+    const jamSession = {
+      title: req.body.title?.trim(),
+      topic: req.body.topic?.trim(),
+      summary: req.body.summary?.trim(),
+      schedule: req.body.schedule?.trim(),
+    };
+
+    if (!jamSession.title || !jamSession.topic || !jamSession.summary) {
+      return res.status(400).json({ message: 'Title, topic, and summary are required' });
+    }
+
+    const currentProfile = lawyer.lawyerProfile?.toObject
+      ? lawyer.lawyerProfile.toObject()
+      : (lawyer.lawyerProfile || {});
+    const currentJamSessions = Array.isArray(currentProfile.jamSessions) ? currentProfile.jamSessions : [];
+
+    lawyer.set('lawyerProfile', {
+      ...currentProfile,
+      jamSessions: [jamSession, ...currentJamSessions],
+    });
+
+    await lawyer.save();
+
+    const savedJamSession = lawyer.lawyerProfile?.jamSessions?.[0];
+    res.status(201).json({
+      message: 'Jam session published',
+      jamSession: formatPublishedJamSession(lawyer, savedJamSession),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 16. GET ALL PUBLISHED INTERNSHIPS
+exports.getPublishedInternships = async (req, res) => {
+  try {
+    const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.internships.0': { $exists: true } })
+      .select(sanitizeUser)
+      .sort({ createdAt: -1 });
+
+    const internships = lawyers.flatMap((lawyer) =>
+      (lawyer.lawyerProfile?.internships || []).map((internship) => formatPublishedInternship(lawyer, internship))
+    ).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
+
+    res.json(internships);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17. GET ALL PUBLISHED JAM SESSIONS
+exports.getPublishedJamSessions = async (req, res) => {
+  try {
+    const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.jamSessions.0': { $exists: true } })
+      .select(sanitizeUser)
+      .sort({ createdAt: -1 });
+
+    const jamSessions = lawyers.flatMap((lawyer) =>
+      (lawyer.lawyerProfile?.jamSessions || []).map((session) => formatPublishedJamSession(lawyer, session))
+    ).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
+
+    res.json(jamSessions);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 18. VERIFY LAWYER (Admin Only)
 exports.verifyLawyer = async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(req.params.id, { 'lawyerProfile.isVerified': req.body.isVerified }, { new: true });
