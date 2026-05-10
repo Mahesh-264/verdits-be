@@ -9,6 +9,9 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: false, select: false }, // optional for pure OTP users
   role: { type: String, enum: ['user', 'lawyer', 'student', 'admin'], default: 'user' },
   profileImage: { type: String, default: "" },
+  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  connections: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   address: {
     latitude: Number,
     longitude: Number,
@@ -41,6 +44,27 @@ const userSchema = new mongoose.Schema({
         location: String,
         stipend: String,
         skills: [String],
+        status: { type: String, enum: ['open', 'closed'], default: 'open' },
+        applications: [
+          {
+            studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            firstName: String,
+            lastName: String,
+            email: String,
+            phone: String,
+            collegeName: String,
+            degree: String,
+            yearOfStudy: String,
+            skills: [String],
+            resumeLink: String,
+            resumeFileName: String,
+            coverMessage: String,
+            linkedIn: String,
+            portfolio: String,
+            status: { type: String, enum: ['pending', 'accepted', 'rejected'], default: 'pending' },
+            submittedAt: { type: Date, default: Date.now },
+          }
+        ],
         createdAt: { type: Date, default: Date.now },
       }
     ],
@@ -50,6 +74,17 @@ const userSchema = new mongoose.Schema({
         topic: String,
         summary: String,
         schedule: String,
+        location: String,
+        participants: [
+          {
+            studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            name: String,
+            email: String,
+            collegeName: String,
+            yearOfStudy: String,
+            joinedAt: { type: Date, default: Date.now },
+          }
+        ],
         createdAt: { type: Date, default: Date.now },
       }
     ]
@@ -61,6 +96,23 @@ const userSchema = new mongoose.Schema({
     currentYear: String,
     specializations: [String],
     skills: [String],
+    internshipApplications: [
+      {
+        postId: { type: mongoose.Schema.Types.ObjectId },
+        lawyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        title: String,
+        status: { type: String, default: 'applied' },
+        appliedAt: { type: Date, default: Date.now },
+      }
+    ],
+    joinedJamSessions: [
+      {
+        sessionId: { type: mongoose.Schema.Types.ObjectId },
+        lawyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        title: String,
+        joinedAt: { type: Date, default: Date.now },
+      }
+    ],
     internships: [
       {
         role: String,

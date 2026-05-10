@@ -1,0 +1,339 @@
+const streamifier = require('streamifier');
+const cloudinary = require('../config/cloudinary');
+const Post = require('../models/Post');
+const User = require('../models/User');
+
+const uploadImageToCloudinary = (buffer) =>
+  new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: 'lawin_posts', resource_type: 'image' },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+
+    streamifier.createReadStream(buffer).pipe(stream);
+  });
+
+const getDisplayName = (user) => {
+  if (!user) return 'User';
+  return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'User';
+};
+
+const getUserSpecializations = (user) => {
+  const userSpecializations = [];
+
+  if (user?.role === 'student') {
+    userSpecializations.push(...(user.studentProfile?.specializations || []));
+  }
+
+  if (user?.role === 'lawyer' && user.lawyerProfile?.specialization) {
+    userSpecializations.push(user.lawyerProfile.specialization);
+  }
+
+  return [...new Set(userSpecializations.map((item) => String(item).trim().toLowerCase()).filter(Boolean))];
+};
+
+const getNetworkIds = (user) => {
+  const ids = [
+    ...(user?.connections || []),
+    ...(user?.following || []),
+    ...(user?.studentProfile?.connectedStudents || []),
+    ...(user?.studentProfile?.followingLawyers || []),
+    user?._id,
+  ];
+
+  return new Set(ids.filter(Boolean).map((item) => String(item)));
+};
+
+const getRelativeTime = (dateValue) => {
+  if (!dateValue) return 'Recently posted';
+
+  const timestamp = new Date(dateValue).getTime();
+  if (Number.isNaN(timestamp)) return 'Recently posted';
+
+  const diff = Date.now() - timestamp;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (diff < hour) {
+    const minutes = Math.max(1, Math.floor(diff / minute));
+    return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  }
+
+  if (diff < day) {
+    const hours = Math.max(1, Math.floor(diff / hour));
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+
+  const days = Math.max(1, Math.floor(diff / day));
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+};
+
+const formatGeneralPost = (post, creator, viewer) => {
+  const creatorSpecializations = getUserSpecializations(creator);
+  const viewerSpecializations = getUserSpecializations(viewer);
+  const hasSharedSpecialization = creatorSpecializations.some((item) => viewerSpecializations.includes(item))
+    || (post.tags || []).some((item) => viewerSpecializations.includes(String(item).trim().toLowerCase()));
+
+  return {
+    id: post._id,
+    type: post.type,
+    sourceModel: 'Post',
+    content: post.content,
+    media: post.media || [],
+    createdAt: post.createdAt,
+    postedAt: getRelativeTime(post.createdAt),
+    visibility: post.visibility,
+    likesCount: post.likesCount || 0,
+    commentsCount: post.commentsCount || 0,
+    tags: post.tags || [],
+    title: post.title || '',
+    location: post.location || '',
+    stipend: post.stipend || '',
+    duration: post.duration || '',
+    schedule: post.schedule || '',
+    createdBy: creator?._id || post.createdBy,
+    creatorName: getDisplayName(creator),
+    creatorRole: creator?.role || 'user',
+    creatorAvatar: getDisplayName(creator).charAt(0).toUpperCase(),
+    creatorProfileImage: creator?.profileImage || '',
+    creatorSpecialization: creator?.lawyerProfile?.specialization || creator?.studentProfile?.specializations || [],
+    specializationMatched: hasSharedSpecialization,
+  };
+};
+
+const scoreFeedItem = (item, viewer, networkIds, viewerSpecializations) => {
+  const creatorId = String(item.createdBy || item.lawyerId || '');
+  if (networkIds.has(creatorId)) return 3;
+
+  const creatorTags = [
+    ...(item.tags || []),
+    ...(Array.isArray(item.specialization) ? item.specialization : []),
+    ...(Array.isArray(item.creatorSpecialization) ? item.creatorSpecialization : [item.creatorSpecialization]).filter(Boolean),
+  ]
+    .map((value) => String(value).trim().toLowerCase())
+    .filter(Boolean);
+
+  if (creatorTags.some((value) => viewerSpecializations.includes(value))) return 2;
+
+  return 1;
+};
+
+const canSeePost = (post, viewer, networkIds) => {
+  if (post.visibility !== 'connections') return true;
+  return networkIds.has(String(post.createdBy));
+};
+
+const buildLegacyOpportunities = async (viewer, networkIds, viewerSpecializations) => {
+  const appliedIds = new Set(
+    (viewer?.studentProfile?.internshipApplications || []).map((item) => String(item.postId))
+  );
+  const joinedIds = new Set(
+    (viewer?.studentProfile?.joinedJamSessions || []).map((item) => String(item.sessionId))
+  );
+
+  const lawyers = await User.find({
+    role: 'lawyer',
+    $or: [
+      { 'lawyerProfile.internships.0': { $exists: true } },
+      { 'lawyerProfile.jamSessions.0': { $exists: true } },
+    ],
+  }).select('firstName lastName role profileImage address lawyerProfile');
+
+  const items = [];
+
+  lawyers.forEach((lawyer) => {
+    const creatorName = getDisplayName(lawyer);
+    const creatorSpecialization = lawyer.lawyerProfile?.specialization || '';
+    const creatorTags = [creatorSpecialization].map((value) => String(value).trim().toLowerCase()).filter(Boolean);
+    const specializationMatched = creatorTags.some((value) => viewerSpecializations.includes(value));
+
+    (lawyer.lawyerProfile?.internships || []).forEach((internship) => {
+      items.push({
+        id: internship._id,
+        type: 'internship',
+        sourceModel: 'LegacyInternship',
+        createdAt: internship.createdAt,
+        postedAt: getRelativeTime(internship.createdAt),
+        createdBy: lawyer._id,
+        creatorName,
+        creatorRole: 'lawyer',
+        creatorAvatar: creatorName.charAt(0).toUpperCase(),
+        creatorProfileImage: lawyer.profileImage || '',
+        creatorSpecialization,
+        specialization: internship.specialization || [],
+        specializationMatched: specializationMatched || (internship.specialization || [])
+          .map((value) => String(value).trim().toLowerCase())
+          .some((value) => viewerSpecializations.includes(value)),
+        title: internship.title || 'Internship',
+        content: internship.description || '',
+        description: internship.description || '',
+        location: internship.location || lawyer.address?.city || lawyer.address?.district || 'Not specified',
+        stipend: internship.stipend || 'Not specified',
+        duration: internship.duration || 'Not specified',
+        applicationCount: internship.applications?.length || 0,
+        applied: appliedIds.has(String(internship._id)),
+        status: internship.status || 'open',
+        media: [],
+        tags: internship.specialization || [],
+      });
+    });
+
+    (lawyer.lawyerProfile?.jamSessions || []).forEach((session) => {
+      items.push({
+        id: session._id,
+        type: 'jam',
+        sourceModel: 'LegacyJamSession',
+        createdAt: session.createdAt,
+        postedAt: getRelativeTime(session.createdAt),
+        createdBy: lawyer._id,
+        creatorName,
+        creatorRole: 'lawyer',
+        creatorAvatar: creatorName.charAt(0).toUpperCase(),
+        creatorProfileImage: lawyer.profileImage || '',
+        creatorSpecialization,
+        specializationMatched,
+        title: session.title || 'Jam Session',
+        content: session.summary || '',
+        summary: session.summary || '',
+        location: session.location || lawyer.address?.city || lawyer.address?.district || 'Online / TBA',
+        schedule: session.schedule || '',
+        participantCount: session.participants?.length || 0,
+        joined: joinedIds.has(String(session._id)),
+        media: [],
+        tags: [creatorSpecialization].filter(Boolean),
+      });
+    });
+  });
+
+  return items
+    .map((item) => ({ ...item, priority: scoreFeedItem(item, viewer, networkIds, viewerSpecializations) }))
+    .sort((first, second) => {
+      if (second.priority !== first.priority) return second.priority - first.priority;
+      return new Date(second.createdAt || 0) - new Date(first.createdAt || 0);
+    });
+};
+
+exports.createPost = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can create posts' });
+    }
+
+    const content = String(req.body.content || '').trim();
+    if (!content) {
+      return res.status(400).json({ message: 'Post content is required' });
+    }
+
+    const tags = Array.isArray(req.body.tags)
+      ? req.body.tags
+      : String(req.body.tags || '')
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+    const files = Array.isArray(req.files) ? req.files.slice(0, 3) : [];
+    const media = files.length
+      ? await Promise.all(files.map((file) => uploadImageToCloudinary(file.buffer)))
+      : [];
+
+    const post = await Post.create({
+      type: ['general', 'internship', 'jam'].includes(req.body.type) ? req.body.type : 'general',
+      content,
+      media,
+      createdBy: req.user._id,
+      visibility: req.body.visibility === 'connections' ? 'connections' : 'public',
+      tags,
+      title: req.body.title?.trim() || '',
+      location: req.body.location?.trim() || '',
+      stipend: req.body.stipend?.trim() || '',
+      duration: req.body.duration?.trim() || '',
+      schedule: req.body.schedule?.trim() || '',
+    });
+
+    const creator = await User.findById(req.user._id).select('firstName lastName role profileImage lawyerProfile studentProfile');
+
+    res.status(201).json({
+      message: 'Post created',
+      post: formatGeneralPost(post, creator, creator),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getFeed = async (req, res) => {
+  try {
+    const viewer = await User.findById(req.user._id).select(
+      'firstName lastName role profileImage followers following connections lawyerProfile studentProfile'
+    );
+
+    if (!viewer) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const networkIds = getNetworkIds(viewer);
+    const viewerSpecializations = getUserSpecializations(viewer);
+
+    const posts = await Post.find({})
+      .sort({ createdAt: -1 })
+      .populate('createdBy', 'firstName lastName role profileImage lawyerProfile studentProfile');
+
+    const formattedGeneralPosts = posts
+      .filter((post) => canSeePost(post, viewer, networkIds))
+      .map((post) => {
+        const formatted = formatGeneralPost(post, post.createdBy, viewer);
+        return {
+          ...formatted,
+          priority: scoreFeedItem(formatted, viewer, networkIds, viewerSpecializations),
+        };
+      });
+
+    const legacyItems = await buildLegacyOpportunities(viewer, networkIds, viewerSpecializations);
+
+    const all = [...formattedGeneralPosts, ...legacyItems].sort((first, second) => {
+      if (second.priority !== first.priority) return second.priority - first.priority;
+      return new Date(second.createdAt || 0) - new Date(first.createdAt || 0);
+    });
+
+    res.json({
+      network: all.filter((item) => item.priority >= 3),
+      suggested: all.filter((item) => item.priority < 3),
+      all,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getUserPosts = async (req, res) => {
+  try {
+    const viewer = await User.findById(req.user._id).select(
+      'firstName lastName role profileImage followers following connections lawyerProfile studentProfile'
+    );
+
+    const user = await User.findById(req.params.id).select(
+      'firstName lastName role profileImage followers following connections lawyerProfile studentProfile'
+    );
+
+    if (!viewer || !user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const networkIds = getNetworkIds(viewer);
+    const posts = await Post.find({ createdBy: req.params.id }).sort({ createdAt: -1 });
+
+    const visiblePosts = posts
+      .filter((post) => String(post.createdBy) === String(viewer._id) || canSeePost(post, viewer, networkIds))
+      .map((post) => formatGeneralPost(post, user, viewer));
+
+    res.json({
+      posts: visiblePosts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};

@@ -9,8 +9,42 @@ const getDisplayName = (user) => {
   return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'Lawyer';
 };
 
+const getRelativeTime = (dateValue) => {
+  if (!dateValue) return 'Recently posted';
+
+  const timestamp = new Date(dateValue).getTime();
+  if (Number.isNaN(timestamp)) return 'Recently posted';
+
+  const difference = Date.now() - timestamp;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (difference < hour) {
+    const minutes = Math.max(1, Math.floor(difference / minute));
+    return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  }
+
+  if (difference < day) {
+    const hours = Math.max(1, Math.floor(difference / hour));
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+
+  const days = Math.max(1, Math.floor(difference / day));
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+};
+
+const getStudentApplicationIds = (student) => new Set(
+  (student?.studentProfile?.internshipApplications || []).map((item) => String(item.postId))
+);
+
+const getJoinedJamSessionIds = (student) => new Set(
+  (student?.studentProfile?.joinedJamSessions || []).map((item) => String(item.sessionId))
+);
+
 const formatPublishedInternship = (lawyer, internship) => ({
   id: internship._id,
+  type: 'internship',
   lawyerId: lawyer._id,
   lawyerName: getDisplayName(lawyer),
   profileImage: lawyer.profileImage || '',
@@ -23,13 +57,17 @@ const formatPublishedInternship = (lawyer, internship) => ({
   location: internship.location || lawyer.address?.city || lawyer.address?.district || 'Not specified',
   stipend: internship.stipend || 'Not specified',
   skills: internship.skills || [],
+  status: internship.status || 'open',
   createdAt: internship.createdAt,
-  postedAt: internship.createdAt ? `Posted ${new Date(internship.createdAt).toLocaleDateString()}` : 'Recently posted',
+  postedAt: getRelativeTime(internship.createdAt),
+  applicationCount: Array.isArray(internship.applications) ? internship.applications.length : 0,
 });
 
 const formatPublishedJamSession = (lawyer, session) => ({
   id: session._id,
+  type: 'jam',
   lawyerId: lawyer._id,
+  lawyerName: getDisplayName(lawyer),
   author: getDisplayName(lawyer),
   profileImage: lawyer.profileImage || '',
   avatar: getDisplayName(lawyer).charAt(0).toUpperCase(),
@@ -37,12 +75,58 @@ const formatPublishedJamSession = (lawyer, session) => ({
   topic: session.topic || 'General Discussion',
   summary: session.summary || '',
   schedule: session.schedule || '',
+  location: session.location || lawyer.address?.city || lawyer.address?.district || 'Online / TBA',
   createdAt: session.createdAt,
-  time: session.createdAt ? new Date(session.createdAt).toLocaleDateString() : 'Recently posted',
+  time: getRelativeTime(session.createdAt),
   meta: lawyer.lawyerProfile?.specialization || 'Lawyer',
-  participants: 'Open for students',
+  participantCount: Array.isArray(session.participants) ? session.participants.length : 0,
+  participants: Array.isArray(session.participants)
+    ? `${session.participants.length} joined`
+    : 'Open for students',
   comments: '0 comments',
 });
+
+const getLawyerInteractionStats = (lawyer) => {
+  const internships = lawyer?.lawyerProfile?.internships || [];
+  const jamSessions = lawyer?.lawyerProfile?.jamSessions || [];
+
+  return {
+    totalInternshipsPosted: internships.length,
+    activeInternships: internships.filter((internship) => (internship.status || 'open') === 'open').length,
+    totalApplicants: internships.reduce((count, internship) => count + (internship.applications?.length || 0), 0),
+    totalJamSessions: jamSessions.length,
+    totalParticipants: jamSessions.reduce((count, session) => count + (session.participants?.length || 0), 0),
+  };
+};
+
+const formatLawyerCard = (lawyer) => ({
+  id: lawyer._id,
+  name: getDisplayName(lawyer),
+  profileImage: lawyer.profileImage || '',
+  avatar: getDisplayName(lawyer).charAt(0).toUpperCase(),
+  specialization: lawyer.lawyerProfile?.specialization || 'General Practice',
+  location: lawyer.address?.city || lawyer.address?.district || lawyer.address?.state || 'India',
+  verified: Boolean(lawyer.lawyerProfile?.isVerified),
+});
+
+const buildStudentFeed = (lawyers, student) => {
+  const appliedIds = getStudentApplicationIds(student);
+  const joinedIds = getJoinedJamSessionIds(student);
+
+  return lawyers.flatMap((lawyer) => {
+    const internships = (lawyer.lawyerProfile?.internships || []).map((internship) => ({
+      ...formatPublishedInternship(lawyer, internship),
+      applied: appliedIds.has(String(internship._id)),
+    }));
+
+    const jamSessions = (lawyer.lawyerProfile?.jamSessions || []).map((session) => ({
+      ...formatPublishedJamSession(lawyer, session),
+      joined: joinedIds.has(String(session._id)),
+    }));
+
+    return [...internships, ...jamSessions];
+  }).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
+};
 
 const generateTokens = (id, role) => {
   console.log(`🎫 Tokens requested for: ${id} [${role}]`);
@@ -236,6 +320,8 @@ exports.toggleFollowLawyer = async (req, res) => {
     if (!Array.isArray(student.studentProfile.followingLawyers)) {
       student.studentProfile.followingLawyers = [];
     }
+    student.following = Array.isArray(student.following) ? student.following : [];
+    lawyer.followers = Array.isArray(lawyer.followers) ? lawyer.followers : [];
 
     const lawyerId = String(lawyer._id);
     const alreadyFollowing = student.studentProfile.followingLawyers.some(
@@ -246,12 +332,21 @@ exports.toggleFollowLawyer = async (req, res) => {
       student.studentProfile.followingLawyers = student.studentProfile.followingLawyers.filter(
         (id) => String(id) !== lawyerId
       );
+      student.following = student.following.filter((id) => String(id) !== lawyerId);
+      lawyer.followers = lawyer.followers.filter((id) => String(id) !== String(student._id));
     } else {
       student.studentProfile.followingLawyers.push(lawyer._id);
+      if (!student.following.some((id) => String(id) === lawyerId)) {
+        student.following.push(lawyer._id);
+      }
+      if (!lawyer.followers.some((id) => String(id) === String(student._id))) {
+        lawyer.followers.push(student._id);
+      }
     }
 
     student.markModified('studentProfile');
     await student.save();
+    await lawyer.save();
 
     res.json({
       message: alreadyFollowing ? 'Lawyer unfollowed' : 'Lawyer followed',
@@ -357,6 +452,8 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
     student.studentProfile.connectedStudents = student.studentProfile.connectedStudents || [];
     requester.studentProfile.connectedStudents = requester.studentProfile.connectedStudents || [];
     requester.studentProfile.outgoingConnectionRequests = requester.studentProfile.outgoingConnectionRequests || [];
+    student.connections = Array.isArray(student.connections) ? student.connections : [];
+    requester.connections = Array.isArray(requester.connections) ? requester.connections : [];
 
     const requesterId = String(requester._id);
     const hasIncomingRequest = student.studentProfile.connectionRequests.some(
@@ -374,6 +471,9 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
     if (!student.studentProfile.connectedStudents.some((id) => String(id) === requesterId)) {
       student.studentProfile.connectedStudents.push(requester._id);
     }
+    if (!student.connections.some((id) => String(id) === requesterId)) {
+      student.connections.push(requester._id);
+    }
 
     requester.studentProfile.outgoingConnectionRequests = requester.studentProfile.outgoingConnectionRequests.filter(
       (id) => String(id) !== String(student._id)
@@ -381,6 +481,9 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
 
     if (!requester.studentProfile.connectedStudents.some((id) => String(id) === String(student._id))) {
       requester.studentProfile.connectedStudents.push(student._id);
+    }
+    if (!requester.connections.some((id) => String(id) === String(student._id))) {
+      requester.connections.push(student._id);
     }
 
     student.markModified('studentProfile');
@@ -468,14 +571,50 @@ exports.getLawyerStudentInteractions = async (req, res) => {
     const internships = (lawyer.lawyerProfile?.internships || [])
       .slice()
       .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
-      .map((internship) => formatPublishedInternship(lawyer, internship));
+      .map((internship) => ({
+        ...formatPublishedInternship(lawyer, internship),
+        applicants: (internship.applications || []).map((application) => ({
+          id: application._id,
+          studentId: application.studentId,
+          name: `${application.firstName || ''} ${application.lastName || ''}`.trim() || 'Student',
+          email: application.email || '',
+          phone: application.phone || '',
+          collegeName: application.collegeName || '',
+          degree: application.degree || '',
+          yearOfStudy: application.yearOfStudy || '',
+          skills: application.skills || [],
+          resumeLink: application.resumeLink || '',
+          resumeFileName: application.resumeFileName || '',
+          coverMessage: application.coverMessage || '',
+          linkedIn: application.linkedIn || '',
+          portfolio: application.portfolio || '',
+          status: application.status || 'pending',
+          submittedAt: application.submittedAt,
+        })),
+      }));
 
     const jamSessions = (lawyer.lawyerProfile?.jamSessions || [])
       .slice()
       .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
-      .map((session) => formatPublishedJamSession(lawyer, session));
+      .map((session) => ({
+        ...formatPublishedJamSession(lawyer, session),
+        joinedStudents: (session.participants || []).map((participant) => ({
+          id: participant._id,
+          studentId: participant.studentId,
+          name: participant.name || 'Student',
+          email: participant.email || '',
+          collegeName: participant.collegeName || '',
+          yearOfStudy: participant.yearOfStudy || '',
+          status: 'joined',
+          joinedAt: participant.joinedAt,
+        })),
+      }));
 
-    res.json({ internships, jamSessions });
+    res.json({
+      internships,
+      jamSessions,
+      stats: getLawyerInteractionStats(lawyer),
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -503,6 +642,7 @@ exports.createLawyerInternship = async (req, res) => {
       skills: Array.isArray(req.body.skills)
         ? req.body.skills.map((item) => String(item).trim()).filter(Boolean)
         : [],
+      status: 'open',
     };
 
     if (!internship.title || !internship.description) {
@@ -545,6 +685,7 @@ exports.createLawyerJamSession = async (req, res) => {
       topic: req.body.topic?.trim(),
       summary: req.body.summary?.trim(),
       schedule: req.body.schedule?.trim(),
+      location: req.body.location?.trim(),
     };
 
     if (!jamSession.title || !jamSession.topic || !jamSession.summary) {
@@ -567,6 +708,371 @@ exports.createLawyerJamSession = async (req, res) => {
     res.status(201).json({
       message: 'Jam session published',
       jamSession: formatPublishedJamSession(lawyer, savedJamSession),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17A. GET STUDENT DISCOVERY DATA
+exports.getStudentDiscovery = async (req, res) => {
+  try {
+    const student = await User.findById(req.user._id).select(sanitizeUser);
+
+    if (!student || student.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can access student discovery' });
+    }
+
+    const lawyers = await User.find({ role: 'lawyer' })
+      .select(sanitizeUser)
+      .sort({ createdAt: -1 });
+
+    const feed = buildStudentFeed(lawyers, student);
+    const internships = feed.filter((item) => item.type === 'internship');
+    const jamSessions = feed.filter((item) => item.type === 'jam');
+    const lawyerCards = lawyers.map(formatLawyerCard);
+
+    res.json({
+      feed,
+      internships,
+      jamSessions,
+      lawyers: lawyerCards,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17B. APPLY TO INTERNSHIP
+exports.applyToInternship = async (req, res) => {
+  try {
+    const student = await User.findById(req.user._id);
+
+    if (!student || student.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can apply to internships' });
+    }
+
+    const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.internships.0': { $exists: true } });
+
+    let targetLawyer = null;
+    let internshipIndex = -1;
+
+    lawyers.some((lawyer) => {
+      internshipIndex = (lawyer.lawyerProfile?.internships || []).findIndex(
+        (internship) => String(internship._id) === String(req.params.postId)
+      );
+
+      if (internshipIndex >= 0) {
+        targetLawyer = lawyer;
+        return true;
+      }
+
+      return false;
+    });
+
+    if (!targetLawyer || internshipIndex < 0) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    if (!student.studentProfile) {
+      student.studentProfile = {};
+    }
+
+    student.studentProfile.internshipApplications = student.studentProfile.internshipApplications || [];
+    const alreadyApplied = student.studentProfile.internshipApplications.some(
+      (item) => String(item.postId) === String(req.params.postId)
+    );
+
+    if (alreadyApplied) {
+      return res.status(400).json({ message: 'You already applied to this internship' });
+    }
+
+    const {
+      firstName,
+      lastName,
+      email,
+      phone,
+      collegeName,
+      degree,
+      yearOfStudy,
+      skills,
+      resumeLink,
+      resumeFileName,
+      coverMessage,
+      linkedIn,
+      portfolio,
+    } = req.body;
+
+    if (!firstName?.trim() || !lastName?.trim() || !email?.trim() || !phone?.trim() || !collegeName?.trim() || !degree?.trim() || !yearOfStudy?.trim()) {
+      return res.status(400).json({ message: 'Please fill all required fields' });
+    }
+
+    const internship = targetLawyer.lawyerProfile.internships[internshipIndex];
+    if ((internship.status || 'open') === 'closed') {
+      return res.status(400).json({ message: 'This internship is closed for applications' });
+    }
+    internship.applications = internship.applications || [];
+    internship.applications.unshift({
+      studentId: student._id,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      email: email.trim(),
+      phone: phone.trim(),
+      collegeName: collegeName.trim(),
+      degree: degree.trim(),
+      yearOfStudy: yearOfStudy.trim(),
+      skills: Array.isArray(skills) ? skills.map((item) => String(item).trim()).filter(Boolean) : [],
+      resumeLink: resumeLink?.trim() || '',
+      resumeFileName: resumeFileName?.trim() || '',
+      coverMessage: coverMessage?.trim() || '',
+      linkedIn: linkedIn?.trim() || '',
+      portfolio: portfolio?.trim() || '',
+      status: 'pending',
+    });
+
+    student.studentProfile.internshipApplications.unshift({
+      postId: internship._id,
+      lawyerId: targetLawyer._id,
+      title: internship.title || 'Internship',
+      status: 'applied',
+    });
+
+    student.markModified('studentProfile');
+    targetLawyer.markModified('lawyerProfile');
+    await Promise.all([student.save(), targetLawyer.save()]);
+
+    res.status(201).json({
+      message: 'Application submitted',
+      application: {
+        postId: internship._id,
+        title: internship.title || 'Internship',
+        appliedAt: new Date().toISOString(),
+      },
+      user: student.toObject(),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17C. JOIN JAM SESSION
+exports.joinJamSession = async (req, res) => {
+  try {
+    const student = await User.findById(req.user._id);
+
+    if (!student || student.role !== 'student') {
+      return res.status(403).json({ message: 'Only students can join jam sessions' });
+    }
+
+    const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.jamSessions.0': { $exists: true } });
+
+    let targetLawyer = null;
+    let sessionIndex = -1;
+
+    lawyers.some((lawyer) => {
+      sessionIndex = (lawyer.lawyerProfile?.jamSessions || []).findIndex(
+        (session) => String(session._id) === String(req.params.sessionId)
+      );
+
+      if (sessionIndex >= 0) {
+        targetLawyer = lawyer;
+        return true;
+      }
+
+      return false;
+    });
+
+    if (!targetLawyer || sessionIndex < 0) {
+      return res.status(404).json({ message: 'Jam session not found' });
+    }
+
+    if (!student.studentProfile) {
+      student.studentProfile = {};
+    }
+
+    student.studentProfile.joinedJamSessions = student.studentProfile.joinedJamSessions || [];
+    const alreadyJoined = student.studentProfile.joinedJamSessions.some(
+      (item) => String(item.sessionId) === String(req.params.sessionId)
+    );
+
+    if (alreadyJoined) {
+      return res.status(400).json({ message: 'You already joined this jam session' });
+    }
+
+    const session = targetLawyer.lawyerProfile.jamSessions[sessionIndex];
+    session.participants = session.participants || [];
+
+    const participantName = req.body.name?.trim() || getDisplayName(student);
+    const participantEmail = req.body.email?.trim() || student.email || '';
+
+    session.participants.unshift({
+      studentId: student._id,
+      name: participantName,
+      email: participantEmail,
+      collegeName: student.studentProfile?.collegeName || '',
+      yearOfStudy: student.studentProfile?.currentYear || '',
+    });
+
+    student.studentProfile.joinedJamSessions.unshift({
+      sessionId: session._id,
+      lawyerId: targetLawyer._id,
+      title: session.title || 'Jam Session',
+    });
+
+    student.markModified('studentProfile');
+    targetLawyer.markModified('lawyerProfile');
+    await Promise.all([student.save(), targetLawyer.save()]);
+
+    res.status(201).json({
+      message: 'Jam session joined',
+      joinedSession: {
+        sessionId: session._id,
+        title: session.title || 'Jam Session',
+        joinedAt: new Date().toISOString(),
+      },
+      user: student.toObject(),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17D. TOGGLE INTERNSHIP STATUS
+exports.toggleInternshipStatus = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can manage internships' });
+    }
+
+    const internships = lawyer.lawyerProfile?.internships || [];
+    const internshipIndex = internships.findIndex(
+      (internship) => String(internship._id) === String(req.params.postId)
+    );
+
+    if (internshipIndex < 0) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    const internship = internships[internshipIndex];
+    internship.status = (internship.status || 'open') === 'open' ? 'closed' : 'open';
+
+    lawyer.markModified('lawyerProfile');
+    await lawyer.save();
+
+    res.json({
+      message: `Internship ${internship.status}`,
+      internship: formatPublishedInternship(lawyer, internship),
+      stats: getLawyerInteractionStats(lawyer),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17E. DELETE INTERNSHIP
+exports.deleteLawyerInternship = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can manage internships' });
+    }
+
+    const internships = lawyer.lawyerProfile?.internships || [];
+    const internshipIndex = internships.findIndex(
+      (internship) => String(internship._id) === String(req.params.postId)
+    );
+
+    if (internshipIndex < 0) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    const [removedInternship] = internships.splice(internshipIndex, 1);
+    lawyer.markModified('lawyerProfile');
+    await lawyer.save();
+
+    if (removedInternship?.applications?.length) {
+      const affectedStudentIds = [
+        ...new Set(
+          removedInternship.applications
+            .map((application) => application.studentId && String(application.studentId))
+            .filter(Boolean)
+        ),
+      ];
+
+      if (affectedStudentIds.length) {
+        await User.updateMany(
+          { _id: { $in: affectedStudentIds } },
+          { $pull: { 'studentProfile.internshipApplications': { postId: removedInternship._id } } }
+        );
+      }
+    }
+
+    res.json({
+      message: 'Internship deleted',
+      deletedPostId: req.params.postId,
+      stats: getLawyerInteractionStats(lawyer),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17F. UPDATE APPLICANT STATUS
+exports.updateInternshipApplicantStatus = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can manage applicants' });
+    }
+
+    const nextStatus = String(req.body.status || '').toLowerCase();
+    if (!['pending', 'accepted', 'rejected'].includes(nextStatus)) {
+      return res.status(400).json({ message: 'Invalid applicant status' });
+    }
+
+    const internships = lawyer.lawyerProfile?.internships || [];
+    const internship = internships.find((item) => String(item._id) === String(req.params.postId));
+
+    if (!internship) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    const applicant = (internship.applications || []).find(
+      (application) => String(application._id) === String(req.params.applicationId)
+    );
+
+    if (!applicant) {
+      return res.status(404).json({ message: 'Applicant not found' });
+    }
+
+    applicant.status = nextStatus;
+    lawyer.markModified('lawyerProfile');
+    await lawyer.save();
+
+    const student = applicant.studentId ? await User.findById(applicant.studentId) : null;
+    if (student?.studentProfile?.internshipApplications?.length) {
+      const studentApplication = student.studentProfile.internshipApplications.find(
+        (application) => String(application.postId) === String(req.params.postId)
+      );
+
+      if (studentApplication) {
+        studentApplication.status = nextStatus;
+        student.markModified('studentProfile');
+        await student.save();
+      }
+    }
+
+    res.json({
+      message: `Applicant ${nextStatus}`,
+      applicant: {
+        id: applicant._id,
+        status: applicant.status,
+      },
+      stats: getLawyerInteractionStats(lawyer),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
