@@ -3,6 +3,9 @@ const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
 
 const sanitizeUser = '-password -refreshToken -otp';
+const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
+
+const normalizeRole = (role) => String(role || '').trim().toLowerCase();
 
 const getDisplayName = (user) => {
   if (!user) return 'Lawyer';
@@ -173,6 +176,16 @@ exports.register = async (req, res) => {
 exports.login = async (req, res) => {
   try {
     const { email, phone, password } = req.body;
+    const requestedRole = normalizeRole(req.body.role);
+
+    if (requestedRole && !allowedRoles.includes(requestedRole)) {
+      return res.status(400).json({ message: 'Invalid role selected' });
+    }
+
+    if (!email && !phone) {
+      return res.status(400).json({ message: 'Email or phone is required' });
+    }
+
     let user;
     if (email) {
       console.log("🚀 Login request:", email);
@@ -186,13 +199,19 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
+    if (requestedRole && user.role !== requestedRole) {
+      return res.status(403).json({
+        message: `This account is registered as ${user.role}. Please use the ${user.role} login.`,
+      });
+    }
+
     const { accessToken, refreshToken } = generateTokens(user._id, user.role);
     user.refreshToken = refreshToken;
     await user.save();
 
     res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
     console.log("✅ Login Successful.");
-    res.json({ accessToken, user });
+    res.json({ accessToken, refreshToken, user });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
@@ -221,21 +240,33 @@ exports.sendOTP = async (req, res) => {
 exports.verifyOTP = async (req, res) => {
   try {
     const { phone, otp } = req.body;
+    const requestedRole = normalizeRole(req.body.role);
+
+    if (requestedRole && !allowedRoles.includes(requestedRole)) {
+      return res.status(400).json({ message: 'Invalid role selected' });
+    }
+
     const user = await User.findOne({ phone, otp, otpExpires: { $gt: Date.now() } });
     if (!user) return res.status(400).json({ message: "Invalid/Expired OTP" });
+
+    if (requestedRole && user.role !== requestedRole) {
+      return res.status(403).json({
+        message: `This account is registered as ${user.role}. Please use the ${user.role} login.`,
+      });
+    }
 
     user.otp = undefined; user.otpExpires = undefined;
     const { accessToken, refreshToken } = generateTokens(user._id, user.role);
     user.refreshToken = refreshToken;
     await user.save();
     res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
-    res.json({ accessToken, user });
+    res.json({ accessToken, refreshToken, user });
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
 // 5. REFRESH TOKEN
 exports.refresh = async (req, res) => {
-  const token = req.cookies.refreshToken;
+  const token = req.body?.refreshToken || req.headers['x-refresh-token'] || req.cookies.refreshToken;
   console.log("♻️ Token Refresh triggered");
   if (!token) return res.status(401).json({ message: "No token" });
   try {
