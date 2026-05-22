@@ -13,6 +13,8 @@ const VALID_CATEGORIES = [
 
 const FALLBACK_REPLY =
   "I'm having trouble understanding your request right now. Please try again or consult a lawyer directly.";
+const NON_LEGAL_REPLY =
+  "I can only help with legal questions. Please ask about a legal issue such as contracts, property, family matters, criminal law, cyber fraud, employment, or court procedures.";
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const AI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 15000);
@@ -78,6 +80,14 @@ const normalizeCategory = (category = "") => {
 
   const mapped = mapping[normalized] || normalized;
   return VALID_CATEGORIES.includes(mapped) ? mapped : "other";
+};
+
+const isLegalRelatedQuery = (text = "") => {
+  const msg = String(text).toLowerCase();
+
+  return /(law|legal|lawyer|advocate|attorney|court|judge|case|petition|notice|agreement|contract|clause|rights|liability|sue|lawsuit|complaint|fir|police|arrest|bail|crime|criminal|theft|assault|cheating|forgery|property|land|tenant|rent|lease|eviction|divorce|marriage|custody|maintenance|alimony|domestic violence|company|business|startup|shareholder|director|compliance|employment|employee|employer|salary|termination|wages|labour|labor|harassment|cyber|fraud|scam|phishing|upi|otp|data privacy|will|inheritance|consumer|trademark|copyright|patent|tax|gst|document|deed|affidavit|notary|legal notice|dispute|settlement|appeal|tribunal|arbitration|mediation)/i.test(
+    msg
+  );
 };
 
 const detectCategoryFromText = (text = "") => {
@@ -190,12 +200,14 @@ const buildPrompt = (message) => `
 You are Lawin AI, a legal assistant for an Indian legal platform.
 
 Your job:
-1. Understand the user's legal issue.
+1. Answer only legal questions.
 2. Give a short, simple, practical answer in plain English.
 3. Classify the issue into exactly one category:
 criminal, property, family, corporate, cyber, employment, other
 
 Rules:
+- If the user asks about anything unrelated to law or legal rights, set "reply" to: "${NON_LEGAL_REPLY}"
+- For non-legal questions, set "category" to "other".
 - Return ONLY valid JSON.
 - Do not use markdown.
 - Do not wrap the response in backticks.
@@ -313,6 +325,16 @@ exports.chatWithAI = async (req, res) => {
   console.log("[AI] Incoming legal query:", incomingMessage);
 
   try {
+    if (!isLegalRelatedQuery(incomingMessage)) {
+      console.log("[AI] Rejected non-legal query");
+
+      return res.status(200).json({
+        reply: NON_LEGAL_REPLY,
+        category: "other",
+        lawyers: [],
+      });
+    }
+
     let reply = FALLBACK_REPLY;
     let category = "other";
     let aiUsed = false;
