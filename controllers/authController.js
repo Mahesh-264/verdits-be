@@ -1,16 +1,59 @@
 const User = require('../models/User');
 const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
+const {
+  normalizeAddressPayload,
+  parseBooleanFlag,
+  parseLimit,
+  parseRadiusKm,
+  parseSearchCoordinates,
+  parseSpecializationTerms,
+  trimString,
+} = require('../utils/location');
+const {
+  mapLawyerDiscoveryCard,
+  searchNearbyLawyers,
+} = require('../services/lawyerDiscoveryService');
+const {
+  hasManualLocationInput,
+  lookupPincodeDetails,
+  resolveLawyerAddress,
+  reverseGeocodeCoordinates,
+} = require('../services/locationResolutionService');
 
 const sanitizeUser = '-password -refreshToken -otp';
 const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
 
 const normalizeRole = (role) => String(role || '').trim().toLowerCase();
+const normalizeEmail = (value) => trimString(value).toLowerCase();
+const normalizePhone = (value) => trimString(value);
 
 const getDisplayName = (user) => {
   if (!user) return 'Lawyer';
   return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'Lawyer';
 };
+
+const getLocationLabel = (user) => (
+  user?.address?.city ||
+  user?.address?.district ||
+  user?.address?.state ||
+  'India'
+);
+
+const normalizeLanguageList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => trimString(item)).filter(Boolean);
+  }
+
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const buildDistanceLabel = (distanceKm) => (
+  Number.isFinite(distanceKm) ? `${distanceKm.toFixed(1)} km away` : null
+);
 
 const getRelativeTime = (dateValue) => {
   if (!dateValue) return 'Recently posted';
@@ -45,7 +88,7 @@ const getJoinedJamSessionIds = (student) => new Set(
   (student?.studentProfile?.joinedJamSessions || []).map((item) => String(item.sessionId))
 );
 
-const formatPublishedInternship = (lawyer, internship) => ({
+const formatPublishedInternship = (lawyer, internship, options = {}) => ({
   id: internship._id,
   type: 'internship',
   lawyerId: lawyer._id,
@@ -57,16 +100,20 @@ const formatPublishedInternship = (lawyer, internship) => ({
   specialization: internship.specialization || [],
   description: internship.description || '',
   duration: internship.duration || 'Not specified',
-  location: internship.location || lawyer.address?.city || lawyer.address?.district || 'Not specified',
+  location: internship.location || getLocationLabel(lawyer),
   stipend: internship.stipend || 'Not specified',
   skills: internship.skills || [],
   status: internship.status || 'open',
   createdAt: internship.createdAt,
   postedAt: getRelativeTime(internship.createdAt),
   applicationCount: Array.isArray(internship.applications) ? internship.applications.length : 0,
+  city: lawyer.address?.city || lawyer.address?.district || '',
+  state: lawyer.address?.state || '',
+  distanceKm: Number.isFinite(options.distanceKm) ? options.distanceKm : null,
+  distanceLabel: buildDistanceLabel(options.distanceKm),
 });
 
-const formatPublishedJamSession = (lawyer, session) => ({
+const formatPublishedJamSession = (lawyer, session, options = {}) => ({
   id: session._id,
   type: 'jam',
   lawyerId: lawyer._id,
@@ -78,7 +125,7 @@ const formatPublishedJamSession = (lawyer, session) => ({
   topic: session.topic || 'General Discussion',
   summary: session.summary || '',
   schedule: session.schedule || '',
-  location: session.location || lawyer.address?.city || lawyer.address?.district || 'Online / TBA',
+  location: session.location || getLocationLabel(lawyer),
   createdAt: session.createdAt,
   time: getRelativeTime(session.createdAt),
   meta: lawyer.lawyerProfile?.specialization || 'Lawyer',
@@ -87,6 +134,10 @@ const formatPublishedJamSession = (lawyer, session) => ({
     ? `${session.participants.length} joined`
     : 'Open for students',
   comments: '0 comments',
+  city: lawyer.address?.city || lawyer.address?.district || '',
+  state: lawyer.address?.state || '',
+  distanceKm: Number.isFinite(options.distanceKm) ? options.distanceKm : null,
+  distanceLabel: buildDistanceLabel(options.distanceKm),
 });
 
 const getLawyerInteractionStats = (lawyer) => {
@@ -108,27 +159,41 @@ const formatLawyerCard = (lawyer) => ({
   profileImage: lawyer.profileImage || '',
   avatar: getDisplayName(lawyer).charAt(0).toUpperCase(),
   specialization: lawyer.lawyerProfile?.specialization || 'General Practice',
-  location: lawyer.address?.city || lawyer.address?.district || lawyer.address?.state || 'India',
+  location: getLocationLabel(lawyer),
+  city: lawyer.address?.city || lawyer.address?.district || '',
+  state: lawyer.address?.state || '',
   verified: Boolean(lawyer.lawyerProfile?.isVerified),
+  isOnline: Boolean(lawyer.lawyerProfile?.isOnline),
+  rating: lawyer.lawyerProfile?.rating || 4.8,
 });
 
-const buildStudentFeed = (lawyers, student) => {
+const buildStudentFeed = (lawyers, student, distanceLookup = new Map()) => {
   const appliedIds = getStudentApplicationIds(student);
   const joinedIds = getJoinedJamSessionIds(student);
 
   return lawyers.flatMap((lawyer) => {
+    const distanceKm = distanceLookup.get(String(lawyer._id));
     const internships = (lawyer.lawyerProfile?.internships || []).map((internship) => ({
-      ...formatPublishedInternship(lawyer, internship),
+      ...formatPublishedInternship(lawyer, internship, { distanceKm }),
       applied: appliedIds.has(String(internship._id)),
     }));
 
     const jamSessions = (lawyer.lawyerProfile?.jamSessions || []).map((session) => ({
-      ...formatPublishedJamSession(lawyer, session),
+      ...formatPublishedJamSession(lawyer, session, { distanceKm }),
       joined: joinedIds.has(String(session._id)),
     }));
 
     return [...internships, ...jamSessions];
-  }).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
+  }).sort((first, second) => {
+    const firstDistance = Number.isFinite(first.distanceKm) ? first.distanceKm : Number.MAX_SAFE_INTEGER;
+    const secondDistance = Number.isFinite(second.distanceKm) ? second.distanceKm : Number.MAX_SAFE_INTEGER;
+
+    if (firstDistance !== secondDistance) {
+      return firstDistance - secondDistance;
+    }
+
+    return new Date(second.createdAt || 0) - new Date(first.createdAt || 0);
+  });
 };
 
 const generateTokens = (id, role) => {
@@ -141,23 +206,61 @@ const generateTokens = (id, role) => {
 // 1. REGISTER
 exports.register = async (req, res) => {
   try {
-    const { firstName, lastName, email, phone, password, role, address, barId, specialization, experienceYears, about, languages, consultationFee, collegeName, collegeEmail, otp } = req.body;
+    const {
+      firstName,
+      lastName,
+      email,
+      phone,
+      password,
+      role,
+      address,
+      barId,
+      specialization,
+      experienceYears,
+      about,
+      languages,
+      consultationFee,
+      collegeName,
+      collegeEmail,
+    } = req.body;
     
-    if (phone && await User.findOne({ phone })) return res.status(400).json({ message: 'Phone exists' });
-    if (email && await User.findOne({ email })) return res.status(400).json({ message: 'Email exists' });
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedPhone = normalizePhone(phone);
+
+    if (normalizedPhone && await User.findOne({ phone: normalizedPhone })) return res.status(400).json({ message: 'Phone exists' });
+    if (normalizedEmail && await User.findOne({ email: normalizedEmail })) return res.status(400).json({ message: 'Email exists' });
 
     // Removed OTP validation for User and Student as per requirement
 
-    const userData = { firstName, lastName, email, phone, password, role, address };
+    const normalizedRole = normalizeRole(role) || 'user';
+    const userData = {
+      firstName: trimString(firstName),
+      lastName: trimString(lastName),
+      email: normalizedEmail,
+      phone: normalizedPhone,
+      password,
+      role: normalizedRole,
+    };
     
-    if (role === 'lawyer') {
+    if (normalizedRole === 'lawyer') {
+      const normalizedLocation = await resolveLawyerAddress(address || {}, {
+        requireCoordinates: hasManualLocationInput(address || {}),
+      });
+      userData.address = normalizedLocation.address;
+      userData.location = normalizedLocation.location;
       userData.lawyerProfile = { 
-        barId, specialization, experienceYears, about, languages, consultationFee,
+        barId: trimString(barId),
+        specialization: trimString(specialization),
+        experienceYears: Number(experienceYears) || 0,
+        about: trimString(about),
+        languages: normalizeLanguageList(languages),
+        consultationFee: Number(consultationFee) || 500,
         isVerified: false 
       };
-    } else if (role === 'student') {
+    } else if (normalizedRole === 'student') {
       userData.studentProfile = {
-        collegeName, collegeEmail
+        collegeName: trimString(collegeName),
+        collegeEmail: trimString(collegeEmail),
       };
     }
     
@@ -168,40 +271,109 @@ exports.register = async (req, res) => {
 
     res.status(201).json({ accessToken, user });
   } catch (error) { 
-    res.status(500).json({ message: error.message }); 
+    res.status(error.statusCode || 500).json({ message: error.message }); 
+  }
+};
+
+// 1A. LOOK UP PINCODE DETAILS FOR LAWYER REGISTRATION
+exports.lookupPincode = async (req, res) => {
+  try {
+    const address = await lookupPincodeDetails(req.params.pincode);
+    res.json({ address });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+// 1B. GEOCODE CITY/DISTRICT/STATE INTO COORDINATES
+exports.geocodeRegistrationAddress = async (req, res) => {
+  try {
+    const resolvedAddress = await resolveLawyerAddress(req.body?.address || req.body || {}, {
+      requireCoordinates: false,
+    });
+
+    if (!resolvedAddress.location) {
+      return res.status(422).json({
+        message: 'Unable to generate coordinates from the provided location details.',
+        address: resolvedAddress.address,
+        resolution: resolvedAddress.resolution,
+      });
+    }
+
+    res.json(resolvedAddress);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+// 1C. REVERSE GEOCODE CURRENT COORDINATES INTO ADDRESS FIELDS
+exports.reverseGeocodeRegistrationAddress = async (req, res) => {
+  try {
+    const latitude = Number(req.query.latitude);
+    const longitude = Number(req.query.longitude);
+    const resolvedAddress = await reverseGeocodeCoordinates({ latitude, longitude });
+    res.json(resolvedAddress);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 // 2. LOGIN
 exports.login = async (req, res) => {
   try {
-    const { email, phone, password } = req.body;
+    const normalizedEmail = normalizeEmail(req.body.email);
+    const normalizedPhone = normalizePhone(req.body.phone);
+    const password = String(req.body.password || '');
+    const email = normalizedEmail;
+    const phone = normalizedPhone;
     const requestedRole = normalizeRole(req.body.role);
 
     if (requestedRole && !allowedRoles.includes(requestedRole)) {
       return res.status(400).json({ message: 'Invalid role selected' });
     }
 
-    if (!email && !phone) {
+    if (!normalizedEmail && !normalizedPhone) {
       return res.status(400).json({ message: 'Email or phone is required' });
     }
 
+    if (!password.trim()) {
+      return res.status(400).json({ message: 'Password is required' });
+    }
+
     let user;
-    if (email) {
+    if (normalizedEmail) {
       console.log("🚀 Login request:", email);
-      user = await User.findOne({ email }).select('+password');
-    } else if (phone) {
+      user = await User.findOne({ email: normalizedEmail }).select('+password');
+    } else if (normalizedPhone) {
       console.log("🚀 Login request:", phone);
-      user = await User.findOne({ phone }).select('+password');
+      user = await User.findOne({ phone: normalizedPhone }).select('+password');
     }
     
-    if (!user || !(await user.matchPassword(password))) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+    if (!user) {
+      return res.status(404).json({
+        message: 'No account found with these details. Please register first.',
+        code: 'ACCOUNT_NOT_FOUND',
+      });
+    }
+
+    if (!user.password) {
+      return res.status(400).json({
+        message: 'This account is not set up for password login yet.',
+        code: 'PASSWORD_NOT_SET',
+      });
+    }
+
+    if (!(await user.matchPassword(password))) {
+      return res.status(401).json({
+        message: 'Incorrect password. Please try again.',
+        code: 'INVALID_PASSWORD',
+      });
     }
 
     if (requestedRole && user.role !== requestedRole) {
       return res.status(403).json({
         message: `This account is registered as ${user.role}. Please use the ${user.role} login.`,
+        code: 'ROLE_MISMATCH',
       });
     }
 
@@ -290,15 +462,45 @@ exports.getLawyers = async (req, res) => {
     if (district) query['address.district'] = district;
 
     // Filter by Specialization (Regex for flexible matching)
-    if (specialization) {
-        // e.g., "Family" matches "Family Law", "family", "Family/Marital"
-        query['lawyerProfile.specialization'] = { $regex: specialization, $options: 'i' };
+    const specializationTerms = parseSpecializationTerms(specialization);
+    if (specializationTerms.length) {
+        query['lawyerProfile.specialization'] = { $regex: specializationTerms.join('|'), $options: 'i' };
     }
     
-    const lawyers = await User.find(query).select(sanitizeUser);
+    const lawyers = await User.find(query)
+      .select(sanitizeUser)
+      .sort({ createdAt: -1 });
     res.json(lawyers);
   } catch (error) { 
     res.status(500).json({ message: error.message }); 
+  }
+};
+
+// 6A. GET NEARBY LAWYERS USING MONGODB GEOSPATIAL SEARCH
+exports.getNearbyLawyers = async (req, res) => {
+  try {
+    const { latitude, longitude } = parseSearchCoordinates(req.query);
+    const radiusKm = parseRadiusKm(req.query.radiusKm);
+    const limit = parseLimit(req.query.limit);
+    const onlineOnly = parseBooleanFlag(req.query.onlineOnly);
+
+    const lawyers = await searchNearbyLawyers({
+      latitude,
+      longitude,
+      specialization: req.query.specialization,
+      onlineOnly,
+      radiusKm,
+      limit,
+    });
+
+    res.json({
+      count: lawyers.length,
+      origin: { latitude, longitude },
+      radiusKm,
+      lawyers: lawyers.map(mapLawyerDiscoveryCard),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -554,23 +756,59 @@ exports.updateProfile = async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Update Basic Fields
-    if (req.body.firstName) user.firstName = req.body.firstName;
-    if (req.body.lastName) user.lastName = req.body.lastName;
-    if (req.body.email) user.email = req.body.email;
+    if (req.body.firstName) user.firstName = trimString(req.body.firstName);
+    if (req.body.lastName) user.lastName = trimString(req.body.lastName);
+    if (req.body.email) user.email = trimString(req.body.email);
     if (req.body.age) user.age = req.body.age;
     if (req.body.gender) user.gender = req.body.gender;
 
     // Update Address (Merge existing with new)
     if (req.body.address) {
-        user.address = { ...user.address, ...req.body.address };
+      const mergedAddress = {
+        ...(user.address?.toObject ? user.address.toObject() : (user.address || {})),
+        ...req.body.address,
+      };
+      const normalizedLocation = user.role === 'lawyer'
+        ? await resolveLawyerAddress(mergedAddress, {
+          requireCoordinates: hasManualLocationInput(mergedAddress),
+        })
+        : normalizeAddressPayload(mergedAddress);
+      user.address = normalizedLocation.address;
+      user.location = normalizedLocation.location;
     }
 
     // Update Lawyer Specifics
     if (req.body.lawyerProfile && user.role === 'lawyer') {
-      user.lawyerProfile = { 
-          ...user.lawyerProfile, 
-          ...req.body.lawyerProfile, 
-          isVerified: false // Reset verification on profile edit
+      const normalizedLawyerProfile = { ...req.body.lawyerProfile };
+
+      if (normalizedLawyerProfile.languages !== undefined) {
+        normalizedLawyerProfile.languages = normalizeLanguageList(normalizedLawyerProfile.languages);
+      }
+
+      if (normalizedLawyerProfile.specialization !== undefined) {
+        normalizedLawyerProfile.specialization = trimString(normalizedLawyerProfile.specialization);
+      }
+
+      if (normalizedLawyerProfile.barId !== undefined) {
+        normalizedLawyerProfile.barId = trimString(normalizedLawyerProfile.barId);
+      }
+
+      if (normalizedLawyerProfile.about !== undefined) {
+        normalizedLawyerProfile.about = trimString(normalizedLawyerProfile.about);
+      }
+
+      if (normalizedLawyerProfile.experienceYears !== undefined) {
+        normalizedLawyerProfile.experienceYears = Number(normalizedLawyerProfile.experienceYears) || 0;
+      }
+
+      if (normalizedLawyerProfile.consultationFee !== undefined) {
+        normalizedLawyerProfile.consultationFee = Number(normalizedLawyerProfile.consultationFee) || 0;
+      }
+
+      user.lawyerProfile = {
+        ...user.lawyerProfile,
+        ...normalizedLawyerProfile,
+        isVerified: false,
       };
     }
 
@@ -585,8 +823,8 @@ exports.updateProfile = async (req, res) => {
     await user.save();
     console.log(`🔄 Profile updated for: ${user.phone}`);
     res.json({ message: "Updated", user });
-  } catch (error) { 
-      res.status(500).json({ message: error.message }); 
+  } catch (error) {
+      res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -754,23 +992,47 @@ exports.getStudentDiscovery = async (req, res) => {
       return res.status(403).json({ message: 'Only students can access student discovery' });
     }
 
-    const lawyers = await User.find({ role: 'lawyer' })
-      .select(sanitizeUser)
-      .sort({ createdAt: -1 });
+    const { latitude, longitude } = parseSearchCoordinates(req.query);
+    const radiusKm = parseRadiusKm(req.query.radiusKm);
+    const limit = parseLimit(req.query.limit, 36);
 
-    const feed = buildStudentFeed(lawyers, student);
+    const nearbyLawyers = await searchNearbyLawyers({
+      latitude,
+      longitude,
+      radiusKm,
+      limit,
+    });
+
+    const lawyerIds = nearbyLawyers.map((lawyer) => lawyer._id);
+    const distanceLookup = new Map(
+      nearbyLawyers.map((lawyer) => [String(lawyer._id), lawyer.distanceKm])
+    );
+
+    const lawyers = lawyerIds.length
+      ? await User.find({ _id: { $in: lawyerIds } })
+        .select(sanitizeUser)
+      : [];
+
+    const lawyerMap = new Map(lawyers.map((lawyer) => [String(lawyer._id), lawyer]));
+    const orderedLawyers = nearbyLawyers
+      .map((lawyer) => lawyerMap.get(String(lawyer._id)))
+      .filter(Boolean);
+
+    const feed = buildStudentFeed(orderedLawyers, student, distanceLookup);
     const internships = feed.filter((item) => item.type === 'internship');
     const jamSessions = feed.filter((item) => item.type === 'jam');
-    const lawyerCards = lawyers.map(formatLawyerCard);
+    const lawyerCards = nearbyLawyers.map(mapLawyerDiscoveryCard);
 
     res.json({
+      origin: { latitude, longitude },
+      radiusKm,
       feed,
       internships,
       jamSessions,
       lawyers: lawyerCards,
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
