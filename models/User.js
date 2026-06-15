@@ -62,6 +62,16 @@ const userSchema = new mongoose.Schema({
         stipend: String,
         skills: [String],
         status: { type: String, enum: ['open', 'closed'], default: 'open' },
+        likedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+        comments: [
+          {
+            userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            name: String,
+            role: String,
+            text: String,
+            createdAt: { type: Date, default: Date.now },
+          }
+        ],
         applications: [
           {
             studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -100,6 +110,16 @@ const userSchema = new mongoose.Schema({
             collegeName: String,
             yearOfStudy: String,
             joinedAt: { type: Date, default: Date.now },
+          }
+        ],
+        likedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+        comments: [
+          {
+            userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            name: String,
+            role: String,
+            text: String,
+            createdAt: { type: Date, default: Date.now },
           }
         ],
         createdAt: { type: Date, default: Date.now },

@@ -88,6 +88,16 @@ const getJoinedJamSessionIds = (student) => new Set(
   (student?.studentProfile?.joinedJamSessions || []).map((item) => String(item.sessionId))
 );
 
+const formatInteractionComment = (comment) => ({
+  id: comment._id,
+  userId: comment.userId,
+  name: comment.name || 'User',
+  role: comment.role || 'user',
+  text: comment.text || '',
+  createdAt: comment.createdAt,
+  postedAt: getRelativeTime(comment.createdAt),
+});
+
 const formatPublishedInternship = (lawyer, internship, options = {}) => ({
   id: internship._id,
   type: 'internship',
@@ -107,6 +117,10 @@ const formatPublishedInternship = (lawyer, internship, options = {}) => ({
   createdAt: internship.createdAt,
   postedAt: getRelativeTime(internship.createdAt),
   applicationCount: Array.isArray(internship.applications) ? internship.applications.length : 0,
+  likesCount: Array.isArray(internship.likedBy) ? internship.likedBy.length : 0,
+  liked: (internship.likedBy || []).some((id) => String(id) === String(options.viewerId)),
+  commentsCount: Array.isArray(internship.comments) ? internship.comments.length : 0,
+  comments: (internship.comments || []).map(formatInteractionComment),
   city: lawyer.address?.city || lawyer.address?.district || '',
   state: lawyer.address?.state || '',
   distanceKm: Number.isFinite(options.distanceKm) ? options.distanceKm : null,
@@ -133,7 +147,11 @@ const formatPublishedJamSession = (lawyer, session, options = {}) => ({
   participants: Array.isArray(session.participants)
     ? `${session.participants.length} joined`
     : 'Open for students',
-  comments: '0 comments',
+  likesCount: Array.isArray(session.likedBy) ? session.likedBy.length : 0,
+  liked: (session.likedBy || []).some((id) => String(id) === String(options.viewerId)),
+  commentsCount: Array.isArray(session.comments) ? session.comments.length : 0,
+  comments: (session.comments || []).map(formatInteractionComment),
+  commentsLabel: `${Array.isArray(session.comments) ? session.comments.length : 0} comments`,
   city: lawyer.address?.city || lawyer.address?.district || '',
   state: lawyer.address?.state || '',
   distanceKm: Number.isFinite(options.distanceKm) ? options.distanceKm : null,
@@ -174,12 +192,12 @@ const buildStudentFeed = (lawyers, student, distanceLookup = new Map()) => {
   return lawyers.flatMap((lawyer) => {
     const distanceKm = distanceLookup.get(String(lawyer._id));
     const internships = (lawyer.lawyerProfile?.internships || []).map((internship) => ({
-      ...formatPublishedInternship(lawyer, internship, { distanceKm }),
+      ...formatPublishedInternship(lawyer, internship, { distanceKm, viewerId: student?._id }),
       applied: appliedIds.has(String(internship._id)),
     }));
 
     const jamSessions = (lawyer.lawyerProfile?.jamSessions || []).map((session) => ({
-      ...formatPublishedJamSession(lawyer, session, { distanceKm }),
+      ...formatPublishedJamSession(lawyer, session, { distanceKm, viewerId: student?._id }),
       joined: joinedIds.has(String(session._id)),
     }));
 
@@ -841,7 +859,7 @@ exports.getLawyerStudentInteractions = async (req, res) => {
       .slice()
       .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
       .map((internship) => ({
-        ...formatPublishedInternship(lawyer, internship),
+        ...formatPublishedInternship(lawyer, internship, { viewerId: req.user._id }),
         applicants: (internship.applications || []).map((application) => ({
           id: application._id,
           studentId: application.studentId,
@@ -866,7 +884,7 @@ exports.getLawyerStudentInteractions = async (req, res) => {
       .slice()
       .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
       .map((session) => ({
-        ...formatPublishedJamSession(lawyer, session),
+        ...formatPublishedJamSession(lawyer, session, { viewerId: req.user._id }),
         joinedStudents: (session.participants || []).map((participant) => ({
           id: participant._id,
           studentId: participant.studentId,
@@ -933,7 +951,7 @@ exports.createLawyerInternship = async (req, res) => {
     const savedInternship = lawyer.lawyerProfile?.internships?.[0];
     res.status(201).json({
       message: 'Internship published',
-      internship: formatPublishedInternship(lawyer, savedInternship),
+      internship: formatPublishedInternship(lawyer, savedInternship, { viewerId: req.user._id }),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -976,7 +994,7 @@ exports.createLawyerJamSession = async (req, res) => {
     const savedJamSession = lawyer.lawyerProfile?.jamSessions?.[0];
     res.status(201).json({
       message: 'Jam session published',
-      jamSession: formatPublishedJamSession(lawyer, savedJamSession),
+      jamSession: formatPublishedJamSession(lawyer, savedJamSession, { viewerId: req.user._id }),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1224,6 +1242,188 @@ exports.joinJamSession = async (req, res) => {
         joinedAt: new Date().toISOString(),
       },
       user: student.toObject(),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const findLawyerJamSession = async (sessionId) => {
+  const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.jamSessions.0': { $exists: true } });
+  let targetLawyer = null;
+  let sessionIndex = -1;
+
+  lawyers.some((lawyer) => {
+    sessionIndex = (lawyer.lawyerProfile?.jamSessions || []).findIndex(
+      (session) => String(session._id) === String(sessionId)
+    );
+
+    if (sessionIndex >= 0) {
+      targetLawyer = lawyer;
+      return true;
+    }
+
+    return false;
+  });
+
+  return { targetLawyer, sessionIndex };
+};
+
+const findLawyerInternship = async (internshipId) => {
+  const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.internships.0': { $exists: true } });
+  let targetLawyer = null;
+  let internshipIndex = -1;
+
+  lawyers.some((lawyer) => {
+    internshipIndex = (lawyer.lawyerProfile?.internships || []).findIndex(
+      (internship) => String(internship._id) === String(internshipId)
+    );
+
+    if (internshipIndex >= 0) {
+      targetLawyer = lawyer;
+      return true;
+    }
+
+    return false;
+  });
+
+  return { targetLawyer, internshipIndex };
+};
+
+exports.toggleInternshipLike = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can react to internships' });
+    }
+
+    const { targetLawyer, internshipIndex } = await findLawyerInternship(req.params.postId);
+    if (!targetLawyer || internshipIndex < 0) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    const internship = targetLawyer.lawyerProfile.internships[internshipIndex];
+    internship.likedBy = Array.isArray(internship.likedBy) ? internship.likedBy : [];
+    const alreadyLiked = internship.likedBy.some((id) => String(id) === String(req.user._id));
+
+    if (alreadyLiked) {
+      internship.likedBy = internship.likedBy.filter((id) => String(id) !== String(req.user._id));
+    } else {
+      internship.likedBy.push(req.user._id);
+    }
+
+    targetLawyer.markModified('lawyerProfile');
+    await targetLawyer.save();
+
+    res.json({
+      liked: !alreadyLiked,
+      likesCount: internship.likedBy.length,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.addInternshipComment = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can comment on internships' });
+    }
+
+    const text = String(req.body.text || '').trim();
+    if (!text) {
+      return res.status(400).json({ message: 'Comment text is required' });
+    }
+
+    const { targetLawyer, internshipIndex } = await findLawyerInternship(req.params.postId);
+    if (!targetLawyer || internshipIndex < 0) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    const internship = targetLawyer.lawyerProfile.internships[internshipIndex];
+    internship.comments = Array.isArray(internship.comments) ? internship.comments : [];
+    internship.comments.unshift({
+      userId: req.user._id,
+      name: getDisplayName(req.user),
+      role: req.user.role,
+      text,
+    });
+
+    targetLawyer.markModified('lawyerProfile');
+    await targetLawyer.save();
+
+    res.status(201).json({
+      comment: formatInteractionComment(internship.comments[0]),
+      commentsCount: internship.comments.length,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.toggleJamSessionLike = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can react to jam sessions' });
+    }
+
+    const { targetLawyer, sessionIndex } = await findLawyerJamSession(req.params.sessionId);
+    if (!targetLawyer || sessionIndex < 0) {
+      return res.status(404).json({ message: 'Jam session not found' });
+    }
+
+    const session = targetLawyer.lawyerProfile.jamSessions[sessionIndex];
+    session.likedBy = Array.isArray(session.likedBy) ? session.likedBy : [];
+    const alreadyLiked = session.likedBy.some((id) => String(id) === String(req.user._id));
+
+    if (alreadyLiked) {
+      session.likedBy = session.likedBy.filter((id) => String(id) !== String(req.user._id));
+    } else {
+      session.likedBy.push(req.user._id);
+    }
+
+    targetLawyer.markModified('lawyerProfile');
+    await targetLawyer.save();
+
+    res.json({
+      liked: !alreadyLiked,
+      likesCount: session.likedBy.length,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.addJamSessionComment = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can comment on jam sessions' });
+    }
+
+    const text = String(req.body.text || '').trim();
+    if (!text) {
+      return res.status(400).json({ message: 'Comment text is required' });
+    }
+
+    const { targetLawyer, sessionIndex } = await findLawyerJamSession(req.params.sessionId);
+    if (!targetLawyer || sessionIndex < 0) {
+      return res.status(404).json({ message: 'Jam session not found' });
+    }
+
+    const session = targetLawyer.lawyerProfile.jamSessions[sessionIndex];
+    session.comments = Array.isArray(session.comments) ? session.comments : [];
+    session.comments.unshift({
+      userId: req.user._id,
+      name: getDisplayName(req.user),
+      role: req.user.role,
+      text,
+    });
+
+    targetLawyer.markModified('lawyerProfile');
+    await targetLawyer.save();
+
+    res.status(201).json({
+      comment: formatInteractionComment(session.comments[0]),
+      commentsCount: session.comments.length,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

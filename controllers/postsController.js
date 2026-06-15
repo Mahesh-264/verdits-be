@@ -21,6 +21,16 @@ const getDisplayName = (user) => {
   return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'User';
 };
 
+const formatComment = (comment) => ({
+  id: comment._id,
+  userId: comment.userId,
+  name: comment.name || 'User',
+  role: comment.role || 'user',
+  text: comment.text || '',
+  createdAt: comment.createdAt,
+  postedAt: getRelativeTime(comment.createdAt),
+});
+
 const getUserSpecializations = (user) => {
   const userSpecializations = [];
 
@@ -89,6 +99,8 @@ const formatGeneralPost = (post, creator, viewer) => {
     visibility: post.visibility,
     likesCount: post.likesCount || 0,
     commentsCount: post.commentsCount || 0,
+    liked: (post.likedBy || []).some((id) => String(id) === String(viewer?._id)),
+    comments: (post.comments || []).map(formatComment),
     tags: post.tags || [],
     title: post.title || '',
     location: post.location || '',
@@ -332,6 +344,73 @@ exports.getUserPosts = async (req, res) => {
 
     res.json({
       posts: visiblePosts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.toggleLike = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can react to posts' });
+    }
+
+    const post = await Post.findById(req.params.id);
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+
+    post.likedBy = Array.isArray(post.likedBy) ? post.likedBy : [];
+    const alreadyLiked = post.likedBy.some((id) => String(id) === String(req.user._id));
+
+    if (alreadyLiked) {
+      post.likedBy = post.likedBy.filter((id) => String(id) !== String(req.user._id));
+    } else {
+      post.likedBy.push(req.user._id);
+    }
+
+    post.likesCount = post.likedBy.length;
+    await post.save();
+
+    res.json({
+      liked: !alreadyLiked,
+      likesCount: post.likesCount,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.addComment = async (req, res) => {
+  try {
+    if (!['student', 'lawyer'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only students and lawyers can comment on posts' });
+    }
+
+    const text = String(req.body.text || '').trim();
+    if (!text) {
+      return res.status(400).json({ message: 'Comment text is required' });
+    }
+
+    const post = await Post.findById(req.params.id);
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+
+    post.comments = Array.isArray(post.comments) ? post.comments : [];
+    post.comments.unshift({
+      userId: req.user._id,
+      name: getDisplayName(req.user),
+      role: req.user.role,
+      text,
+    });
+    post.commentsCount = post.comments.length;
+    await post.save();
+
+    res.status(201).json({
+      comment: formatComment(post.comments[0]),
+      commentsCount: post.commentsCount,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

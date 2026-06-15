@@ -224,6 +224,54 @@ User legal question:
 ${message}
 `.trim();
 
+const buildNoticePrompt = ({ documentType, details, lawyer }) => `
+You are Lawin AI drafting assistant for an Indian lawyer.
+
+Draft a professional ${documentType} using the facts below.
+
+Rules:
+- Return only the final document text.
+- Do not use markdown fences.
+- Use formal legal notice style suitable for India.
+- Include placeholders like [date] only when the fact is missing.
+- Keep the language clear, assertive, and editable.
+- Do not invent case numbers, addresses, statutes, or dates that were not provided.
+- Add a short "Subject" line.
+- Add numbered paragraphs and a clear demand/compliance section.
+- End with "For and on behalf of" and the lawyer details if available.
+
+Lawyer:
+Name: ${lawyer?.name || [lawyer?.firstName, lawyer?.lastName].filter(Boolean).join(" ").trim() || "Advocate"}
+Specialization: ${lawyer?.lawyerProfile?.specialization || "Legal Practice"}
+Bar Council ID: ${lawyer?.lawyerProfile?.barId || ""}
+Location: ${lawyer?.address?.city || lawyer?.address?.district || lawyer?.address?.state || ""}
+
+Document facts:
+${details}
+`.trim();
+
+const buildNoticeEditPrompt = ({ documentType, currentDraft, editInstruction, lawyer }) => `
+You are Lawin AI drafting assistant for an Indian lawyer.
+
+Revise the existing ${documentType || "legal notice"} according to the lawyer's edit instruction.
+
+Rules:
+- Return only the revised full document text.
+- Preserve useful legal structure and formal tone.
+- Apply the requested changes exactly.
+- Do not add facts that are not in the current draft or instruction.
+- Do not use markdown fences.
+
+Lawyer:
+Name: ${lawyer?.name || [lawyer?.firstName, lawyer?.lastName].filter(Boolean).join(" ").trim() || "Advocate"}
+
+Edit instruction:
+${editInstruction}
+
+Current draft:
+${currentDraft}
+`.trim();
+
 const buildLawyerRegex = (category) => {
   const aliases = CATEGORY_ALIASES[category] || [category];
   return new RegExp(aliases.map(escapeRegex).join("|"), "i");
@@ -283,6 +331,27 @@ const callGeminiOnce = async (message) => {
     rawText,
     parsed,
   };
+};
+
+const callGeminiText = async (prompt, temperature = 0.2) => {
+  const ai = getGeminiClient();
+
+  const response = await withTimeout(
+    ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
+      config: { temperature },
+    }),
+    AI_TIMEOUT_MS,
+    "Gemini notice request"
+  );
+
+  return extractTextFromResponse(response);
 };
 
 const getAICompletion = async (message) => {
@@ -382,5 +451,56 @@ exports.chatWithAI = async (req, res) => {
       category: "other",
       lawyers: [],
     });
+  }
+};
+
+exports.generateNoticeDraft = async (req, res) => {
+  try {
+    if (req.user?.role !== "lawyer") {
+      return res.status(403).json({ message: "Only lawyers can generate legal notices" });
+    }
+
+    const documentType = String(req.body?.documentType || "").trim();
+    const details = String(req.body?.details || "").trim();
+
+    if (!documentType || !details) {
+      return res.status(400).json({ message: "Document type and details are required" });
+    }
+
+    const draft = await callGeminiText(
+      buildNoticePrompt({ documentType, details, lawyer: req.user }),
+      0.15
+    );
+
+    res.json({ documentType, draft });
+  } catch (error) {
+    console.error("[AI] notice generation failed:", error?.message || error);
+    res.status(500).json({ message: "Failed to generate notice draft" });
+  }
+};
+
+exports.editNoticeDraft = async (req, res) => {
+  try {
+    if (req.user?.role !== "lawyer") {
+      return res.status(403).json({ message: "Only lawyers can edit legal notices" });
+    }
+
+    const documentType = String(req.body?.documentType || "").trim();
+    const currentDraft = String(req.body?.currentDraft || "").trim();
+    const editInstruction = String(req.body?.editInstruction || "").trim();
+
+    if (!currentDraft || !editInstruction) {
+      return res.status(400).json({ message: "Current draft and edit instruction are required" });
+    }
+
+    const draft = await callGeminiText(
+      buildNoticeEditPrompt({ documentType, currentDraft, editInstruction, lawyer: req.user }),
+      0.1
+    );
+
+    res.json({ documentType, draft });
+  } catch (error) {
+    console.error("[AI] notice edit failed:", error?.message || error);
+    res.status(500).json({ message: "Failed to edit notice draft" });
   }
 };
