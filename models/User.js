@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const isValidLatitude = (value) => Number.isFinite(value) && value >= -90 && value <= 90;
+const isValidLongitude = (value) => Number.isFinite(value) && value >= -180 && value <= 180;
+
 const userSchema = new mongoose.Schema({
   firstName: { type: String, required: true },
   lastName: { type: String, required: true },
@@ -21,6 +24,18 @@ const userSchema = new mongoose.Schema({
     city: String, // Added city for location filtering
     country: { type: String, default: "India" },
   },
+  // GeoJSON coordinates power geospatial discovery queries for nearby lawyers.
+  location: {
+    type: {
+      type: String,
+      enum: ['Point'],
+      default: 'Point',
+    },
+    coordinates: {
+      type: [Number],
+      default: undefined,
+    },
+  },
   refreshToken: String,
   otp: { type: String, select: false },
   otpExpires: { type: Date, select: false },
@@ -33,7 +48,9 @@ const userSchema = new mongoose.Schema({
     casesHandled: { type: Number, default: 0 }, // Added for UI
     languages: [String], // e.g., ["Hindi", "English"]
     consultationFee: { type: Number, default: 500 }, // Added fee
+    rating: { type: Number, default: 4.8 },
     isVerified: { type: Boolean, default: false },
+    isOnline: { type: Boolean, default: true },
     internships: [
       {
         title: String,
@@ -127,6 +144,44 @@ const userSchema = new mongoose.Schema({
     outgoingConnectionRequests: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
   }
 }, { timestamps: true });
+
+// Keep legacy address latitude/longitude in sync with the GeoJSON search field.
+userSchema.pre('validate', function syncGeoLocation() {
+  const addressLatitude = Number(this.address?.latitude);
+  const addressLongitude = Number(this.address?.longitude);
+
+  if (isValidLatitude(addressLatitude) && isValidLongitude(addressLongitude)) {
+    this.address.latitude = addressLatitude;
+    this.address.longitude = addressLongitude;
+    this.location = {
+      type: 'Point',
+      coordinates: [addressLongitude, addressLatitude],
+    };
+    return;
+  }
+
+  const coordinates = Array.isArray(this.location?.coordinates) ? this.location.coordinates : [];
+  const [locationLongitude, locationLatitude] = coordinates;
+
+  if (isValidLatitude(locationLatitude) && isValidLongitude(locationLongitude)) {
+    this.address = {
+      ...this.address,
+      latitude: locationLatitude,
+      longitude: locationLongitude,
+    };
+    this.location = {
+      type: 'Point',
+      coordinates: [locationLongitude, locationLatitude],
+    };
+    return;
+  }
+
+  this.location = undefined;
+});
+
+userSchema.index({ location: '2dsphere' });
+userSchema.index({ role: 1, 'lawyerProfile.specialization': 1 });
+userSchema.index({ role: 1, 'lawyerProfile.isOnline': 1 });
 
 // Virtual for full name
 userSchema.virtual('name').get(function() {
