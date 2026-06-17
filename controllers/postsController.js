@@ -189,6 +189,10 @@ const buildLegacyOpportunities = async (viewer, networkIds, viewerSpecialization
         applicationCount: internship.applications?.length || 0,
         applied: appliedIds.has(String(internship._id)),
         status: internship.status || 'open',
+        likesCount: Array.isArray(internship.likedBy) ? internship.likedBy.length : 0,
+        liked: (internship.likedBy || []).some((id) => String(id) === String(viewer?._id)),
+        commentsCount: Array.isArray(internship.comments) ? internship.comments.length : 0,
+        comments: (internship.comments || []).map(formatComment),
         media: [],
         tags: internship.specialization || [],
       });
@@ -215,6 +219,10 @@ const buildLegacyOpportunities = async (viewer, networkIds, viewerSpecialization
         schedule: session.schedule || '',
         participantCount: session.participants?.length || 0,
         joined: joinedIds.has(String(session._id)),
+        likesCount: Array.isArray(session.likedBy) ? session.likedBy.length : 0,
+        liked: (session.likedBy || []).some((id) => String(id) === String(viewer?._id)),
+        commentsCount: Array.isArray(session.comments) ? session.comments.length : 0,
+        comments: (session.comments || []).map(formatComment),
         media: [],
         tags: [creatorSpecialization].filter(Boolean),
       });

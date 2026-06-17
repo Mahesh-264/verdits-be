@@ -28,6 +28,20 @@ const normalizeRole = (role) => String(role || '').trim().toLowerCase();
 const normalizeEmail = (value) => trimString(value).toLowerCase();
 const normalizePhone = (value) => trimString(value);
 
+const getOptionalViewerId = (req) => {
+  const token = req.headers.authorization?.startsWith('Bearer')
+    ? req.headers.authorization.split(' ')[1]
+    : null;
+
+  if (!token) return null;
+
+  try {
+    return jwt.verify(token, process.env.JWT_SECRET).id;
+  } catch {
+    return null;
+  }
+};
+
 const getDisplayName = (user) => {
   if (!user) return 'Lawyer';
   return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'Lawyer';
@@ -1575,12 +1589,15 @@ exports.updateInternshipApplicantStatus = async (req, res) => {
 // 16. GET ALL PUBLISHED INTERNSHIPS
 exports.getPublishedInternships = async (req, res) => {
   try {
+    const viewerId = getOptionalViewerId(req);
     const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.internships.0': { $exists: true } })
       .select(sanitizeUser)
       .sort({ createdAt: -1 });
 
     const internships = lawyers.flatMap((lawyer) =>
-      (lawyer.lawyerProfile?.internships || []).map((internship) => formatPublishedInternship(lawyer, internship))
+      (lawyer.lawyerProfile?.internships || []).map((internship) =>
+        formatPublishedInternship(lawyer, internship, { viewerId })
+      )
     ).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
 
     res.json(internships);
@@ -1592,12 +1609,15 @@ exports.getPublishedInternships = async (req, res) => {
 // 17. GET ALL PUBLISHED JAM SESSIONS
 exports.getPublishedJamSessions = async (req, res) => {
   try {
+    const viewerId = getOptionalViewerId(req);
     const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.jamSessions.0': { $exists: true } })
       .select(sanitizeUser)
       .sort({ createdAt: -1 });
 
     const jamSessions = lawyers.flatMap((lawyer) =>
-      (lawyer.lawyerProfile?.jamSessions || []).map((session) => formatPublishedJamSession(lawyer, session))
+      (lawyer.lawyerProfile?.jamSessions || []).map((session) =>
+        formatPublishedJamSession(lawyer, session, { viewerId })
+      )
     ).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
 
     res.json(jamSessions);
