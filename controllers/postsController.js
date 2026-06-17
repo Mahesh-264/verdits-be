@@ -2,6 +2,7 @@ const streamifier = require('streamifier');
 const cloudinary = require('../config/cloudinary');
 const Post = require('../models/Post');
 const User = require('../models/User');
+const { createNotification, getDisplayName } = require('../services/notificationService');
 
 const uploadImageToCloudinary = (buffer) =>
   new Promise((resolve, reject) => {
@@ -15,11 +16,6 @@ const uploadImageToCloudinary = (buffer) =>
 
     streamifier.createReadStream(buffer).pipe(stream);
   });
-
-const getDisplayName = (user) => {
-  if (!user) return 'User';
-  return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || 'User';
-};
 
 const formatComment = (comment) => ({
   id: comment._id,
@@ -364,7 +360,7 @@ exports.toggleLike = async (req, res) => {
       return res.status(403).json({ message: 'Only students and lawyers can react to posts' });
     }
 
-    const post = await Post.findById(req.params.id);
+    const post = await Post.findById(req.params.id).populate('createdBy', 'firstName lastName role');
     if (!post) {
       return res.status(404).json({ message: 'Post not found' });
     }
@@ -376,6 +372,21 @@ exports.toggleLike = async (req, res) => {
       post.likedBy = post.likedBy.filter((id) => String(id) !== String(req.user._id));
     } else {
       post.likedBy.push(req.user._id);
+      
+      // 🔔 Send notification when someone likes a post
+      if (String(post.createdBy._id) !== String(req.user._id)) {
+        const io = req.app.get('socketio');
+        await createNotification({
+          recipient: post.createdBy._id,
+          actor: req.user._id,
+          type: 'post_liked',
+          title: 'Your post was liked',
+          message: `${getDisplayName(req.user)} liked your post.`,
+          link: `/profile/${req.user._id}`,
+          metadata: { postId: post._id, postContent: post.content.substring(0, 50) },
+          io,
+        });
+      }
     }
 
     post.likesCount = post.likedBy.length;
@@ -401,7 +412,7 @@ exports.addComment = async (req, res) => {
       return res.status(400).json({ message: 'Comment text is required' });
     }
 
-    const post = await Post.findById(req.params.id);
+    const post = await Post.findById(req.params.id).populate('createdBy', 'firstName lastName role');
     if (!post) {
       return res.status(404).json({ message: 'Post not found' });
     }
@@ -415,6 +426,21 @@ exports.addComment = async (req, res) => {
     });
     post.commentsCount = post.comments.length;
     await post.save();
+
+    // 🔔 Send notification when someone comments on a post
+    if (String(post.createdBy._id) !== String(req.user._id)) {
+      const io = req.app.get('socketio');
+      await createNotification({
+        recipient: post.createdBy._id,
+        actor: req.user._id,
+        type: 'post_commented',
+        title: 'New comment on your post',
+        message: `${getDisplayName(req.user)} commented: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
+        link: `/profile/${req.user._id}`,
+        metadata: { postId: post._id, commentText: text, postContent: post.content.substring(0, 50) },
+        io,
+      });
+    }
 
     res.status(201).json({
       comment: formatComment(post.comments[0]),

@@ -3,6 +3,7 @@ const User = require("../models/User");
 const cloudinary = require("../config/cloudinary");
 const streamifier = require("streamifier");
 const mongoose = require("mongoose");
+const { createNotification, getDisplayName } = require("../services/notificationService");
 
 // --- Helper: Cloudinary Upload ---
 const uploadToCloudinary = (buffer, messageType) => {
@@ -48,6 +49,16 @@ exports.sendMessage = async (req, res) => {
       io.to(req.user.id.toString()).emit("newMessage", populated);
       io.to(receiverId.toString()).emit("newMessage", populated);
     }
+    await createNotification({
+      recipient: receiverId,
+      actor: req.user._id,
+      type: 'new_message',
+      title: 'New message received',
+      message: `${getDisplayName(req.user, 'Someone')} sent you a ${newMessageData.messageType} message.`,
+      link: '/chat',
+      metadata: { messageId: message._id },
+      io,
+    });
     res.status(201).json({ success: true, message: populated });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

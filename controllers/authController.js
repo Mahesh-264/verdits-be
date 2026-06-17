@@ -20,6 +20,10 @@ const {
   resolveLawyerAddress,
   reverseGeocodeCoordinates,
 } = require('../services/locationResolutionService');
+const {
+  createNotification,
+  getDisplayName: getNotificationDisplayName,
+} = require('../services/notificationService');
 
 const sanitizeUser = '-password -refreshToken -otp';
 const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
@@ -607,6 +611,18 @@ exports.toggleFollowLawyer = async (req, res) => {
       if (!lawyer.followers.some((id) => String(id) === String(student._id))) {
         lawyer.followers.push(student._id);
       }
+
+      // 🔔 Send notification when someone follows a lawyer
+      await createNotification({
+        recipient: lawyer._id,
+        actor: student._id,
+        type: 'follow_accepted',
+        title: 'You have a new follower',
+        message: `${getNotificationDisplayName(student, 'A student')} started following you.`,
+        link: `/lawyer-profile/${lawyer._id}`,
+        metadata: { followerId: student._id },
+        io: req.app.get('socketio'),
+      });
     }
 
     student.markModified('studentProfile');
@@ -685,6 +701,16 @@ exports.sendStudentConnectionRequest = async (req, res) => {
     targetStudent.markModified('studentProfile');
     await student.save();
     await targetStudent.save();
+    await createNotification({
+      recipient: targetStudent._id,
+      actor: student._id,
+      type: 'student_connection_request',
+      title: 'New student connection request',
+      message: `${getNotificationDisplayName(student, 'A student')} sent you a connection request.`,
+      link: '/student-network',
+      metadata: { requesterId: student._id },
+      io: req.app.get('socketio'),
+    });
 
     res.json({
       message: 'Connection request sent',
@@ -755,6 +781,16 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
     requester.markModified('studentProfile');
     await student.save();
     await requester.save();
+    await createNotification({
+      recipient: requester._id,
+      actor: student._id,
+      type: 'student_connection_accepted',
+      title: 'Connection request accepted',
+      message: `${getNotificationDisplayName(student, 'A student')} accepted your connection request.`,
+      link: '/student-network',
+      metadata: { studentId: student._id },
+      io: req.app.get('socketio'),
+    });
 
     res.json({
       message: 'Connection request accepted',
@@ -1166,6 +1202,18 @@ exports.applyToInternship = async (req, res) => {
     targetLawyer.markModified('lawyerProfile');
     await Promise.all([student.save(), targetLawyer.save()]);
 
+    // 🔔 Send notification when someone applies to an internship
+    await createNotification({
+      recipient: targetLawyer._id,
+      actor: student._id,
+      type: 'internship_application',
+      title: 'New internship application',
+      message: `${getNotificationDisplayName(student, 'A student')} applied to your internship: ${internship.title || 'Untitled'}`,
+      link: '/lawyer-dash',
+      metadata: { internshipId: internship._id, lawyerId: targetLawyer._id, studentId: student._id },
+      io: req.app.get('socketio'),
+    });
+
     res.status(201).json({
       message: 'Application submitted',
       application: {
@@ -1248,6 +1296,18 @@ exports.joinJamSession = async (req, res) => {
     targetLawyer.markModified('lawyerProfile');
     await Promise.all([student.save(), targetLawyer.save()]);
 
+    // 🔔 Send notification when someone joins a jam session
+    await createNotification({
+      recipient: targetLawyer._id,
+      actor: student._id,
+      type: 'jam_session_joined',
+      title: 'Student joined jam session',
+      message: `${getNotificationDisplayName(student, 'A student')} joined your jam session: ${session.title || 'Untitled'}`,
+      link: '/lawyer-dash',
+      metadata: { sessionId: session._id, lawyerId: targetLawyer._id, studentId: student._id },
+      io: req.app.get('socketio'),
+    });
+
     res.status(201).json({
       message: 'Jam session joined',
       joinedSession: {
@@ -1328,6 +1388,20 @@ exports.toggleInternshipLike = async (req, res) => {
     targetLawyer.markModified('lawyerProfile');
     await targetLawyer.save();
 
+    // 🔔 Send notification when someone likes an internship
+    if (String(targetLawyer._id) !== String(req.user._id) && !alreadyLiked) {
+      await createNotification({
+        recipient: targetLawyer._id,
+        actor: req.user._id,
+        type: 'post_liked',
+        title: 'Internship liked',
+        message: `${getNotificationDisplayName(req.user, 'Someone')} liked your internship: ${internship.title || 'Untitled'}`,
+        link: `/lawyer-profile/${targetLawyer._id}`,
+        metadata: { internshipId: internship._id, lawyerId: targetLawyer._id },
+        io: req.app.get('socketio'),
+      });
+    }
+
     res.json({
       liked: !alreadyLiked,
       likesCount: internship.likedBy.length,
@@ -1365,6 +1439,20 @@ exports.addInternshipComment = async (req, res) => {
     targetLawyer.markModified('lawyerProfile');
     await targetLawyer.save();
 
+    // 🔔 Send notification when someone comments on an internship
+    if (String(targetLawyer._id) !== String(req.user._id)) {
+      await createNotification({
+        recipient: targetLawyer._id,
+        actor: req.user._id,
+        type: 'post_commented',
+        title: 'New comment on internship',
+        message: `${getNotificationDisplayName(req.user, 'Someone')} commented on your internship: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
+        link: `/lawyer-profile/${targetLawyer._id}`,
+        metadata: { internshipId: internship._id, commentText: text, lawyerId: targetLawyer._id },
+        io: req.app.get('socketio'),
+      });
+    }
+
     res.status(201).json({
       comment: formatInteractionComment(internship.comments[0]),
       commentsCount: internship.comments.length,
@@ -1397,6 +1485,20 @@ exports.toggleJamSessionLike = async (req, res) => {
 
     targetLawyer.markModified('lawyerProfile');
     await targetLawyer.save();
+
+    // 🔔 Send notification when someone likes a jam session
+    if (String(targetLawyer._id) !== String(req.user._id) && !alreadyLiked) {
+      await createNotification({
+        recipient: targetLawyer._id,
+        actor: req.user._id,
+        type: 'post_liked',
+        title: 'Jam session liked',
+        message: `${getNotificationDisplayName(req.user, 'Someone')} liked your jam session: ${session.title || 'Untitled'}`,
+        link: `/lawyer-profile/${targetLawyer._id}`,
+        metadata: { sessionId: session._id, lawyerId: targetLawyer._id },
+        io: req.app.get('socketio'),
+      });
+    }
 
     res.json({
       liked: !alreadyLiked,
@@ -1434,6 +1536,20 @@ exports.addJamSessionComment = async (req, res) => {
 
     targetLawyer.markModified('lawyerProfile');
     await targetLawyer.save();
+
+    // 🔔 Send notification when someone comments on a jam session
+    if (String(targetLawyer._id) !== String(req.user._id)) {
+      await createNotification({
+        recipient: targetLawyer._id,
+        actor: req.user._id,
+        type: 'post_commented',
+        title: 'New comment on jam session',
+        message: `${getNotificationDisplayName(req.user, 'Someone')} commented on your jam session: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
+        link: `/lawyer-profile/${targetLawyer._id}`,
+        metadata: { sessionId: session._id, commentText: text, lawyerId: targetLawyer._id },
+        io: req.app.get('socketio'),
+      });
+    }
 
     res.status(201).json({
       comment: formatInteractionComment(session.comments[0]),
@@ -1570,6 +1686,18 @@ exports.updateInternshipApplicantStatus = async (req, res) => {
         studentApplication.status = nextStatus;
         student.markModified('studentProfile');
         await student.save();
+
+        // 🔔 Send notification when application status changes
+        await createNotification({
+          recipient: student._id,
+          actor: lawyer._id,
+          type: 'internship_application_update',
+          title: `Internship application ${nextStatus}`,
+          message: `Your application for "${internship.title || 'Internship'}" has been ${nextStatus} by ${getNotificationDisplayName(lawyer, 'the lawyer')}.`,
+          link: '/student-dash',
+          metadata: { internshipId: internship._id, lawyerId: lawyer._id, status: nextStatus },
+          io: req.app.get('socketio'),
+        });
       }
     }
 
@@ -1630,6 +1758,21 @@ exports.getPublishedJamSessions = async (req, res) => {
 exports.verifyLawyer = async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(req.params.id, { 'lawyerProfile.isVerified': req.body.isVerified }, { new: true });
+    
+    // 🔔 Send notification to the lawyer
+    if (user) {
+      await createNotification({
+        recipient: user._id,
+        type: 'system',
+        title: user.lawyerProfile?.isVerified ? 'Profile verified' : 'Profile verification updated',
+        message: user.lawyerProfile?.isVerified 
+          ? 'Congratulations! Your profile has been verified by the administrator.' 
+          : 'Your verification status has been updated by the administrator.',
+        link: '/lawyer-profile/me',
+        io: req.app.get('socketio'),
+      });
+    }
+
     console.log(`👮 Lawyer ${user.phone} verification set to ${req.body.isVerified}`);
     res.json(user);
   } catch (error) { res.status(500).json({ message: error.message }); }

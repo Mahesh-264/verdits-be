@@ -7,6 +7,7 @@ const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const morgan = require('morgan');
 const connectDB = require('./config/db');
+const { createNotification, getDisplayName } = require('./services/notificationService');
 
 const app = express();
 const server = http.createServer(app); 
@@ -58,6 +59,16 @@ io.on("connection", (socket) => {
 
             io.to(socket.userId).emit("newMessage", populated);
             io.to(receiverId).emit("newMessage", populated);
+            await createNotification({
+                recipient: receiverId,
+                actor: socket.userId,
+                type: 'new_message',
+                title: 'New message received',
+                message: `${getDisplayName(populated.sender, 'Someone')} sent you a message.`,
+                link: '/chat',
+                metadata: { messageId: newMessage._id },
+                io,
+            });
 
         } catch (err) {
             console.error("Socket Error:", err);
@@ -67,6 +78,76 @@ io.on("connection", (socket) => {
 
     socket.on("disconnect", () => {
         console.log("❌ Offline:", socket.userId);
+    });
+
+    // 🔔 Real-time Post Notifications
+    socket.on("postLiked", async ({ postId, postCreatorId }) => {
+        try {
+            if (String(postCreatorId) !== String(socket.userId)) {
+                io.to(String(postCreatorId)).emit("notification:update", {
+                    type: 'post_liked',
+                    title: 'Your post was liked',
+                    actor: socket.userId,
+                });
+            }
+        } catch (err) {
+            console.error("Socket Error (postLiked):", err);
+        }
+    });
+
+    socket.on("postCommented", async ({ postId, postCreatorId, comment }) => {
+        try {
+            if (String(postCreatorId) !== String(socket.userId)) {
+                io.to(String(postCreatorId)).emit("notification:update", {
+                    type: 'post_commented',
+                    title: 'New comment on your post',
+                    actor: socket.userId,
+                    comment: comment.substring(0, 50),
+                });
+            }
+        } catch (err) {
+            console.error("Socket Error (postCommented):", err);
+        }
+    });
+
+    // 🔔 Real-time Follow/Connection Notifications
+    socket.on("lawyerFollowed", async ({ lawyerId }) => {
+        try {
+            if (String(lawyerId) !== String(socket.userId)) {
+                io.to(String(lawyerId)).emit("notification:update", {
+                    type: 'follow_accepted',
+                    title: 'You have a new follower',
+                    actor: socket.userId,
+                });
+            }
+        } catch (err) {
+            console.error("Socket Error (lawyerFollowed):", err);
+        }
+    });
+
+    socket.on("connectionRequested", async ({ targetStudentId }) => {
+        try {
+            io.to(String(targetStudentId)).emit("notification:update", {
+                type: 'student_connection_request',
+                title: 'New student connection request',
+                actor: socket.userId,
+            });
+        } catch (err) {
+            console.error("Socket Error (connectionRequested):", err);
+        }
+    });
+
+    socket.on("appointmentStatusChanged", async ({ studentId, status }) => {
+        try {
+            const notificationType = status === 'accepted' ? 'appointment_accepted' : 'appointment_rejected';
+            io.to(String(studentId)).emit("notification:update", {
+                type: notificationType,
+                title: status === 'accepted' ? 'Lawyer accepted your request' : 'Lawyer rejected your request',
+                actor: socket.userId,
+            });
+        } catch (err) {
+            console.error("Socket Error (appointmentStatusChanged):", err);
+        }
     });
 });
 
@@ -86,6 +167,7 @@ app.use('/api/posts', require('./routes/postsRoutes'));
 app.use('/api/ai', require('./routes/aiRoutes'));
 app.use('/api/chat', require('./routes/chatRoutes')); 
 app.use('/api/appointments', require('./routes/appointmentRoutes'));
+app.use('/api/notifications', require('./routes/notificationRoutes'));
 
 app.use((err, req, res, next) => {
     console.error("❌ SERVER CRASH PREVENTED ❌");
