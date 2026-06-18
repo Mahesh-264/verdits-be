@@ -53,8 +53,8 @@ io.on("connection", (socket) => {
             // 🌟 THE ULTIMATE FIX: Populate BOTH the Sender AND Receiver!
             // Now the frontend gets all the data it needs instantly.
             const populated = await newMessage.populate([
-                { path: "sender", select: "name phone profileImage role lawyerProfile.specialization" },
-                { path: "receiver", select: "name phone profileImage role lawyerProfile.specialization" }
+                { path: "sender", select: "firstName lastName phone profileImage role lawyerProfile.specialization" },
+                { path: "receiver", select: "firstName lastName phone profileImage role lawyerProfile.specialization" }
             ]);
 
             io.to(socket.userId).emit("newMessage", populated);
@@ -65,8 +65,8 @@ io.on("connection", (socket) => {
                 type: 'new_message',
                 title: 'New message received',
                 message: `${getDisplayName(populated.sender, 'Someone')} sent you a message.`,
-                link: '/chat',
-                metadata: { messageId: newMessage._id },
+                link: `/chat?partnerId=${socket.userId}`,
+                metadata: { messageId: newMessage._id, senderId: socket.userId, receiverId },
                 io,
             });
 

@@ -113,6 +113,55 @@ const formatGeneralPost = (post, creator, viewer) => {
   };
 };
 
+const getPostNotificationLink = (post) => {
+  const creatorRole = post.createdBy?.role;
+  const postId = post._id;
+
+  if (creatorRole === 'lawyer') {
+    return `/lawyer-dash?section=student-interactions&tab=posts&postId=${postId}`;
+  }
+
+  if (creatorRole === 'student') {
+    return `/student-home?postId=${postId}`;
+  }
+
+  return '/dashboard';
+};
+
+const getPostAudienceIds = (creator) => {
+  if (creator?.role === 'lawyer') return creator.followers || [];
+  if (creator?.role === 'student') {
+    return [
+      ...(creator.connections || []),
+      ...(creator.studentProfile?.connectedStudents || []),
+    ];
+  }
+  return [];
+};
+
+const notifyPostAudience = async ({ creator, post, io }) => {
+  const audienceIds = [
+    ...new Set(
+      getPostAudienceIds(creator)
+        .map((id) => String(id))
+        .filter((id) => id && id !== String(creator._id))
+    ),
+  ];
+
+  if (!audienceIds.length) return;
+
+  await Promise.all(audienceIds.map((recipient) => createNotification({
+    recipient,
+    actor: creator._id,
+    type: 'new_post',
+    title: creator.role === 'lawyer' ? 'New lawyer post' : 'New student post',
+    message: `${getDisplayName(creator)} shared a new post.`,
+    link: getPostNotificationLink(post),
+    metadata: { postId: post._id, creatorId: creator._id, creatorRole: creator.role },
+    io,
+  })));
+};
+
 const scoreFeedItem = (item, viewer, networkIds, viewerSpecializations) => {
   const creatorId = String(item.createdBy || item.lawyerId || '');
   if (networkIds.has(creatorId)) return 3;
@@ -270,7 +319,15 @@ exports.createPost = async (req, res) => {
       schedule: req.body.schedule?.trim() || '',
     });
 
-    const creator = await User.findById(req.user._id).select('firstName lastName role profileImage lawyerProfile studentProfile');
+    const creator = await User.findById(req.user._id).select(
+      'firstName lastName role profileImage followers following connections lawyerProfile studentProfile'
+    );
+
+    await notifyPostAudience({
+      creator,
+      post,
+      io: req.app.get('socketio'),
+    });
 
     res.status(201).json({
       message: 'Post created',
@@ -382,7 +439,7 @@ exports.toggleLike = async (req, res) => {
           type: 'post_liked',
           title: 'Your post was liked',
           message: `${getDisplayName(req.user)} liked your post.`,
-          link: `/profile/${req.user._id}`,
+          link: getPostNotificationLink(post),
           metadata: { postId: post._id, postContent: post.content.substring(0, 50) },
           io,
         });
@@ -436,7 +493,7 @@ exports.addComment = async (req, res) => {
         type: 'post_commented',
         title: 'New comment on your post',
         message: `${getDisplayName(req.user)} commented: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
-        link: `/profile/${req.user._id}`,
+        link: getPostNotificationLink(post),
         metadata: { postId: post._id, commentText: text, postContent: post.content.substring(0, 50) },
         io,
       });

@@ -36,7 +36,15 @@ const createNotification = async ({
 
 const getDisplayName = (user, fallback = 'Someone') => {
   if (!user) return fallback;
-  return `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.name || fallback;
+  const fullName = [user.firstName, user.lastName]
+    .filter((part) => part && part !== 'undefined')
+    .join(' ')
+    .trim();
+
+  if (fullName) return fullName;
+  if (user.name && user.name !== 'undefined undefined') return user.name;
+  if (user.phone) return user.phone;
+  return fallback;
 };
 
 module.exports = {

@@ -84,6 +84,8 @@ const userSchema = new mongoose.Schema({
             yearOfStudy: String,
             skills: [String],
             resumeLink: String,
+            resumeUrl: String,
+            resumePublicId: String,
             resumeFileName: String,
             coverMessage: String,
             linkedIn: String,
@@ -205,7 +207,7 @@ userSchema.index({ role: 1, 'lawyerProfile.isOnline': 1 });
 
 // Virtual for full name
 userSchema.virtual('name').get(function() {
-  return `${this.firstName} ${this.lastName}`;
+  return [this.firstName, this.lastName].filter(Boolean).join(' ').trim();
 });
 
 // Ensure virtuals are included in JSON and Object output

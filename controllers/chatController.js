@@ -41,8 +41,10 @@ exports.sendMessage = async (req, res) => {
 
     const message = await Message.create(newMessageData);
     
-    // 🚨 FIX IS HERE: Added 'name' and 'profileImage'
-    const populated = await message.populate("sender", "name phone profileImage role lawyerProfile.specialization");
+    const populated = await message.populate(
+      "sender",
+      "firstName lastName phone profileImage role lawyerProfile.specialization"
+    );
 
     const io = req.app.get("socketio");
     if (io) {
@@ -55,8 +57,8 @@ exports.sendMessage = async (req, res) => {
       type: 'new_message',
       title: 'New message received',
       message: `${getDisplayName(req.user, 'Someone')} sent you a ${newMessageData.messageType} message.`,
-      link: '/chat',
-      metadata: { messageId: message._id },
+      link: `/chat?partnerId=${req.user._id}`,
+      metadata: { messageId: message._id, senderId: req.user._id, receiverId },
       io,
     });
     res.status(201).json({ success: true, message: populated });
@@ -90,7 +92,17 @@ exports.getConversations = async (req, res) => {
           _id: 1, lastMessage: 1, lastMessageType: 1, timestamp: 1, unreadCount: 1,
           contact: {
             _id: "$contactInfo._id",
-            name: "$contactInfo.name",               // 🚨 FIX IS HERE: Included name
+            name: {
+              $trim: {
+                input: {
+                  $concat: [
+                    { $ifNull: ["$contactInfo.firstName", ""] },
+                    " ",
+                    { $ifNull: ["$contactInfo.lastName", ""] }
+                  ]
+                }
+              }
+            },
             profileImage: "$contactInfo.profileImage", // 🚨 FIX IS HERE: Included profileImage
             phone: "$contactInfo.phone",
             role: "$contactInfo.role",

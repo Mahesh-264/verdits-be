@@ -62,8 +62,8 @@ router.post('/', async (req, res) => {
     type: 'appointment_request',
     title: 'New appointment request',
     message: `${getDisplayName(client, 'A user')} requested an appointment with you.`,
-    link: '/lawyer-dash',
-    metadata: { appointmentId: appointment._id },
+    link: `/lawyer-dash?section=appointments&appointmentId=${appointment._id}`,
+    metadata: { appointmentId: appointment._id, requesterId: userId },
     io: req.app.get('socketio'),
   });
 
@@ -131,7 +131,7 @@ router.put('/:id', async (req, res) => {
     title: notificationTitle,
     message: `${getDisplayName(lawyer, 'Your lawyer')} ${status} your appointment request.`,
     link: `/lawyer-profile/${updated.lawyerId?._id || updated.lawyerId}`,
-    metadata: { appointmentId: updated._id, status },
+    metadata: { appointmentId: updated._id, status, lawyerId: updated.lawyerId?._id || updated.lawyerId },
     io: req.app.get('socketio'),
   });
 

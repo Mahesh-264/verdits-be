@@ -1,6 +1,8 @@
 const User = require('../models/User');
 const Otp = require('../models/Otp');
 const jwt = require('jsonwebtoken');
+const cloudinary = require('../config/cloudinary');
+const streamifier = require('streamifier');
 const {
   normalizeAddressPayload,
   parseBooleanFlag,
@@ -202,6 +204,53 @@ const formatLawyerCard = (lawyer) => ({
   isOnline: Boolean(lawyer.lawyerProfile?.isOnline),
   rating: lawyer.lawyerProfile?.rating || 4.8,
 });
+
+const notifyLawyerFollowers = async ({ lawyer, type, title, message, link, metadata, io }) => {
+  const followerIds = [
+    ...new Set((lawyer.followers || []).map((id) => String(id)).filter((id) => id && id !== String(lawyer._id))),
+  ];
+
+  if (!followerIds.length) return;
+
+  await Promise.all(followerIds.map((recipient) => createNotification({
+    recipient,
+    actor: lawyer._id,
+    type,
+    title,
+    message,
+    link,
+    metadata,
+    io,
+  })));
+};
+
+const uploadResumeToCloudinary = (file) => (
+  new Promise((resolve, reject) => {
+    if (!file) {
+      resolve(null);
+      return;
+    }
+
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'lawin_resumes',
+        resource_type: 'raw',
+        use_filename: true,
+        unique_filename: true,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve({
+          url: result.secure_url,
+          publicId: result.public_id,
+          fileName: file.originalname,
+        });
+      }
+    );
+
+    streamifier.createReadStream(file.buffer).pipe(stream);
+  })
+);
 
 const buildStudentFeed = (lawyers, student, distanceLookup = new Map()) => {
   const appliedIds = getStudentApplicationIds(student);
@@ -619,7 +668,7 @@ exports.toggleFollowLawyer = async (req, res) => {
         type: 'follow_accepted',
         title: 'You have a new follower',
         message: `${getNotificationDisplayName(student, 'A student')} started following you.`,
-        link: `/lawyer-profile/${lawyer._id}`,
+        link: '/lawyer-dash?section=student-interactions&tab=posts',
         metadata: { followerId: student._id },
         io: req.app.get('socketio'),
       });
@@ -707,7 +756,7 @@ exports.sendStudentConnectionRequest = async (req, res) => {
       type: 'student_connection_request',
       title: 'New student connection request',
       message: `${getNotificationDisplayName(student, 'A student')} sent you a connection request.`,
-      link: '/student-network',
+      link: `/student-network?tab=students&requesterId=${student._id}`,
       metadata: { requesterId: student._id },
       io: req.app.get('socketio'),
     });
@@ -787,7 +836,7 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
       type: 'student_connection_accepted',
       title: 'Connection request accepted',
       message: `${getNotificationDisplayName(student, 'A student')} accepted your connection request.`,
-      link: '/student-network',
+      link: `/student-network?tab=students&studentId=${student._id}`,
       metadata: { studentId: student._id },
       io: req.app.get('socketio'),
     });
@@ -921,6 +970,7 @@ exports.getLawyerStudentInteractions = async (req, res) => {
           yearOfStudy: application.yearOfStudy || '',
           skills: application.skills || [],
           resumeLink: application.resumeLink || '',
+          resumeUrl: application.resumeUrl || '',
           resumeFileName: application.resumeFileName || '',
           coverMessage: application.coverMessage || '',
           linkedIn: application.linkedIn || '',
@@ -999,6 +1049,16 @@ exports.createLawyerInternship = async (req, res) => {
     await lawyer.save();
 
     const savedInternship = lawyer.lawyerProfile?.internships?.[0];
+    await notifyLawyerFollowers({
+      lawyer,
+      type: 'new_post',
+      title: 'New internship posted',
+      message: `${getNotificationDisplayName(lawyer, 'A lawyer')} posted a new internship: ${savedInternship.title || 'Internship'}.`,
+      link: `/student-explore?tab=internships&itemId=${savedInternship._id}`,
+      metadata: { internshipId: savedInternship._id, lawyerId: lawyer._id, creatorRole: 'lawyer' },
+      io: req.app.get('socketio'),
+    });
+
     res.status(201).json({
       message: 'Internship published',
       internship: formatPublishedInternship(lawyer, savedInternship, { viewerId: req.user._id }),
@@ -1042,6 +1102,16 @@ exports.createLawyerJamSession = async (req, res) => {
     await lawyer.save();
 
     const savedJamSession = lawyer.lawyerProfile?.jamSessions?.[0];
+    await notifyLawyerFollowers({
+      lawyer,
+      type: 'new_post',
+      title: 'New jam session posted',
+      message: `${getNotificationDisplayName(lawyer, 'A lawyer')} posted a new jam session: ${savedJamSession.title || 'Jam Session'}.`,
+      link: `/student-explore?tab=jamSessions&itemId=${savedJamSession._id}`,
+      metadata: { sessionId: savedJamSession._id, lawyerId: lawyer._id, creatorRole: 'lawyer' },
+      io: req.app.get('socketio'),
+    });
+
     res.status(201).json({
       message: 'Jam session published',
       jamSession: formatPublishedJamSession(lawyer, savedJamSession, { viewerId: req.user._id }),
@@ -1172,6 +1242,9 @@ exports.applyToInternship = async (req, res) => {
     if ((internship.status || 'open') === 'closed') {
       return res.status(400).json({ message: 'This internship is closed for applications' });
     }
+
+    const uploadedResume = await uploadResumeToCloudinary(req.file);
+
     internship.applications = internship.applications || [];
     internship.applications.unshift({
       studentId: student._id,
@@ -1184,7 +1257,9 @@ exports.applyToInternship = async (req, res) => {
       yearOfStudy: yearOfStudy.trim(),
       skills: Array.isArray(skills) ? skills.map((item) => String(item).trim()).filter(Boolean) : [],
       resumeLink: resumeLink?.trim() || '',
-      resumeFileName: resumeFileName?.trim() || '',
+      resumeUrl: uploadedResume?.url || '',
+      resumePublicId: uploadedResume?.publicId || '',
+      resumeFileName: uploadedResume?.fileName || resumeFileName?.trim() || '',
       coverMessage: coverMessage?.trim() || '',
       linkedIn: linkedIn?.trim() || '',
       portfolio: portfolio?.trim() || '',
@@ -1209,7 +1284,7 @@ exports.applyToInternship = async (req, res) => {
       type: 'internship_application',
       title: 'New internship application',
       message: `${getNotificationDisplayName(student, 'A student')} applied to your internship: ${internship.title || 'Untitled'}`,
-      link: '/lawyer-dash',
+      link: `/lawyer-dash?section=student-interactions&tab=internships&itemId=${internship._id}&drawer=applicants`,
       metadata: { internshipId: internship._id, lawyerId: targetLawyer._id, studentId: student._id },
       io: req.app.get('socketio'),
     });
@@ -1303,7 +1378,7 @@ exports.joinJamSession = async (req, res) => {
       type: 'jam_session_joined',
       title: 'Student joined jam session',
       message: `${getNotificationDisplayName(student, 'A student')} joined your jam session: ${session.title || 'Untitled'}`,
-      link: '/lawyer-dash',
+      link: `/lawyer-dash?section=student-interactions&tab=jamSessions&itemId=${session._id}&drawer=participants`,
       metadata: { sessionId: session._id, lawyerId: targetLawyer._id, studentId: student._id },
       io: req.app.get('socketio'),
     });
@@ -1396,7 +1471,7 @@ exports.toggleInternshipLike = async (req, res) => {
         type: 'post_liked',
         title: 'Internship liked',
         message: `${getNotificationDisplayName(req.user, 'Someone')} liked your internship: ${internship.title || 'Untitled'}`,
-        link: `/lawyer-profile/${targetLawyer._id}`,
+        link: `/lawyer-dash?section=student-interactions&tab=internships&itemId=${internship._id}`,
         metadata: { internshipId: internship._id, lawyerId: targetLawyer._id },
         io: req.app.get('socketio'),
       });
@@ -1447,7 +1522,7 @@ exports.addInternshipComment = async (req, res) => {
         type: 'post_commented',
         title: 'New comment on internship',
         message: `${getNotificationDisplayName(req.user, 'Someone')} commented on your internship: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
-        link: `/lawyer-profile/${targetLawyer._id}`,
+        link: `/lawyer-dash?section=student-interactions&tab=internships&itemId=${internship._id}`,
         metadata: { internshipId: internship._id, commentText: text, lawyerId: targetLawyer._id },
         io: req.app.get('socketio'),
       });
@@ -1494,7 +1569,7 @@ exports.toggleJamSessionLike = async (req, res) => {
         type: 'post_liked',
         title: 'Jam session liked',
         message: `${getNotificationDisplayName(req.user, 'Someone')} liked your jam session: ${session.title || 'Untitled'}`,
-        link: `/lawyer-profile/${targetLawyer._id}`,
+        link: `/lawyer-dash?section=student-interactions&tab=jamSessions&itemId=${session._id}`,
         metadata: { sessionId: session._id, lawyerId: targetLawyer._id },
         io: req.app.get('socketio'),
       });
@@ -1545,7 +1620,7 @@ exports.addJamSessionComment = async (req, res) => {
         type: 'post_commented',
         title: 'New comment on jam session',
         message: `${getNotificationDisplayName(req.user, 'Someone')} commented on your jam session: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`,
-        link: `/lawyer-profile/${targetLawyer._id}`,
+        link: `/lawyer-dash?section=student-interactions&tab=jamSessions&itemId=${session._id}`,
         metadata: { sessionId: session._id, commentText: text, lawyerId: targetLawyer._id },
         io: req.app.get('socketio'),
       });
@@ -1694,7 +1769,7 @@ exports.updateInternshipApplicantStatus = async (req, res) => {
           type: 'internship_application_update',
           title: `Internship application ${nextStatus}`,
           message: `Your application for "${internship.title || 'Internship'}" has been ${nextStatus} by ${getNotificationDisplayName(lawyer, 'the lawyer')}.`,
-          link: '/student-dash',
+          link: `/student-explore?tab=internships&itemId=${internship._id}`,
           metadata: { internshipId: internship._id, lawyerId: lawyer._id, status: nextStatus },
           io: req.app.get('socketio'),
         });

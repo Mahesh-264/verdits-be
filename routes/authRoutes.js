@@ -1,7 +1,27 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const { protect, authorize } = require('../middleware/authMiddleware');
+
+const resumeUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, callback) => {
+    const allowedTypes = new Set([
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ]);
+
+    if (allowedTypes.has(file.mimetype)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Resume must be a PDF, DOC, or DOCX file'));
+  },
+});
 
 router.post('/register', authController.register);
 router.post('/login', authController.login);
@@ -20,7 +40,7 @@ router.use(protect);
 router.get('/me', authController.getCurrentUser);
 router.get('/students', authController.getStudents);
 router.get('/student/discovery', authorize('student'), authController.getStudentDiscovery);
-router.post('/student/internships/:postId/apply', authorize('student'), authController.applyToInternship);
+router.post('/student/internships/:postId/apply', authorize('student'), resumeUpload.single('resumeFile'), authController.applyToInternship);
 router.post('/student/jam-sessions/:sessionId/join', authorize('student'), authController.joinJamSession);
 router.post('/jam-sessions/:sessionId/like', authorize('student', 'lawyer'), authController.toggleJamSessionLike);
 router.post('/jam-sessions/:sessionId/comments', authorize('student', 'lawyer'), authController.addJamSessionComment);

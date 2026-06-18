@@ -30,6 +30,7 @@ const notificationSchema = new mongoose.Schema(
         'internship_application',
         'internship_application_update',
         'jam_session_joined',
+        'new_post',
         'system',
       ],
       default: 'system',
