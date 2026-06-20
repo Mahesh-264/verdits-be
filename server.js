@@ -182,3 +182,8 @@ connectDB().then(() => {
         console.log(`📡 Socket.io engine ready for Real-time Chat`);
     });
 });
+
+
+// app.get("/", (req, res) => {
+//   res.send("Lawin Backend Running 🚀");
+// });

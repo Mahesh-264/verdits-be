@@ -231,23 +231,23 @@ const uploadResumeToCloudinary = (file) => (
       return;
     }
 
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: 'lawin_resumes',
-        resource_type: 'raw',
-        use_filename: true,
-        unique_filename: true,
-      },
-      (error, result) => {
-        if (error) return reject(error);
-        resolve({
-          url: result.secure_url,
-          publicId: result.public_id,
-          fileName: file.originalname,
-        });
-      }
-    );
+   const stream = cloudinary.uploader.upload_stream(
+  {
+    folder: 'lawin_resumes',
+    resource_type: 'raw',
+    use_filename: true,
+    unique_filename: true,
+  },
+  (error, result) => {
+    if (error) return reject(error);
 
+    resolve({
+      url: result.secure_url,
+      publicId: result.public_id,
+      fileName: file.originalname,
+    });
+  }
+);
     streamifier.createReadStream(file.buffer).pipe(stream);
   })
 );

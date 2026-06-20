@@ -430,7 +430,7 @@ exports.toggleLike = async (req, res) => {
     } else {
       post.likedBy.push(req.user._id);
       
-      // 🔔 Send notification when someone likes a post
+      //  Send notification when someone likes a post
       if (String(post.createdBy._id) !== String(req.user._id)) {
         const io = req.app.get('socketio');
         await createNotification({
