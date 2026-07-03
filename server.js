@@ -1,4 +1,10 @@
-require('dotenv').config();
+const path = require('path');
+const dotenvResult = require('dotenv').config({ path: path.join(__dirname, '.env') });
+
+if (process.env.SMTP_DEBUG === 'true') {
+    console.log('[env] cwd:', process.cwd());
+    console.log('[env] loaded:', dotenvResult.error ? dotenvResult.error.message : path.join(__dirname, '.env'));
+}
 const express = require('express');
 const http = require('http'); 
 const { Server } = require('socket.io'); 

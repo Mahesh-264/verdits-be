@@ -1,0 +1,120 @@
+const { trimString } = require('../utils/location');
+
+const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
+const registrationRoles = ['user', 'lawyer', 'student'];
+
+const normalizeRole = (role) => String(role || '').trim().toLowerCase();
+const normalizeEmail = (value) => trimString(value).toLowerCase();
+const normalizePhone = (value) => trimString(value);
+const isEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+const requireFields = (payload, fields) => {
+  const missing = fields.filter((field) => !trimString(payload[field]));
+  if (missing.length) {
+    const error = new Error(`${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} required`);
+    error.statusCode = 400;
+    throw error;
+  }
+};
+
+const validateRoleFields = (body, role) => {
+  if (role === 'student') {
+    requireFields(body, ['collegeName', 'collegeEmail']);
+  }
+
+  if (role === 'lawyer') {
+    requireFields(body, ['barId', 'specialization', 'languages', 'experienceYears']);
+  }
+};
+
+const validateEmailRegistration = (body) => {
+  const role = normalizeRole(body.role) || 'user';
+
+  if (!registrationRoles.includes(role)) {
+    const error = new Error('Invalid role selected');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  requireFields(body, ['firstName', 'lastName', 'email', 'phone', 'password', 'confirmPassword']);
+
+  if (!isEmail(normalizeEmail(body.email))) {
+    const error = new Error('Enter a valid email address');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (String(body.password).length < 8) {
+    const error = new Error('Password must be at least 8 characters');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (body.password !== body.confirmPassword) {
+    const error = new Error('Passwords do not match');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  validateRoleFields(body, role);
+  return role;
+};
+
+const validateGoogleProfile = (body) => {
+  const role = normalizeRole(body.role) || 'user';
+
+  if (!registrationRoles.includes(role)) {
+    const error = new Error('Invalid role selected');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  requireFields(body, ['phone', 'password', 'confirmPassword']);
+
+  if (String(body.password || '').length < 8) {
+    const error = new Error('Password must be at least 8 characters');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (body.password !== body.confirmPassword) {
+    const error = new Error('Passwords do not match');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  validateRoleFields(body, role);
+  return role;
+};
+
+const validatePasswordReset = (body) => {
+  requireFields(body, ['email', 'otp', 'password', 'confirmPassword']);
+
+  if (!isEmail(normalizeEmail(body.email))) {
+    const error = new Error('Enter a valid email address');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (String(body.password).length < 8) {
+    const error = new Error('Password must be at least 8 characters');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (body.password !== body.confirmPassword) {
+    const error = new Error('Passwords do not match');
+    error.statusCode = 400;
+    throw error;
+  }
+};
+
+module.exports = {
+  allowedRoles,
+  normalizeEmail,
+  normalizePhone,
+  normalizeRole,
+  validateEmailRegistration,
+  validateGoogleProfile,
+  validatePasswordReset,
+};

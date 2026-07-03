@@ -11,6 +11,14 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, unique: true, required: true },
   password: { type: String, required: false, select: false }, // optional for pure OTP users
   role: { type: String, enum: ['user', 'lawyer', 'student', 'admin'], default: 'user' },
+  authProvider: {
+    type: String,
+    enum: ['email', 'google', 'both'],
+    default: 'email',
+  },
+  googleId: { type: String, unique: true, sparse: true },
+  verified: { type: Boolean, default: true },
+  profilePicture: { type: String, default: '' },
   profileImage: { type: String, default: "" },
   followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
@@ -39,6 +47,10 @@ const userSchema = new mongoose.Schema({
   refreshToken: String,
   otp: { type: String, select: false },
   otpExpires: { type: Date, select: false },
+  resetOtpHash: { type: String, select: false },
+  resetOtpExpiresAt: { type: Date, select: false },
+  resetResendAvailableAt: { type: Date, select: false },
+  resetAttemptCount: { type: Number, default: 0, select: false },
   lawyerProfile: {
     barId: String,
     specialization: String, // e.g., "Criminal", "Civil"
@@ -217,8 +229,17 @@ userSchema.set('toObject', { virtuals: true });
 // Hash password before saving
 userSchema.pre('save', async function() {
   if (!this.isModified('password')) return;
+  if (this.$locals.passwordIsHashed) return;
   console.log(`🔐 Hashing password for: ${this.phone}`);
   this.password = await bcrypt.hash(this.password, 12);
+});
+
+userSchema.pre('save', function syncProfilePictures() {
+  if (!this.profileImage && this.profilePicture) {
+    this.profileImage = this.profilePicture;
+  } else if (!this.profilePicture && this.profileImage) {
+    this.profilePicture = this.profileImage;
+  }
 });
 
 // Helper for Login

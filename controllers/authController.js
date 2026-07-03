@@ -1,5 +1,7 @@
 const User = require('../models/User');
 const Otp = require('../models/Otp');
+const PendingRegistration = require('../models/PendingRegistration');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
@@ -26,6 +28,26 @@ const {
   createNotification,
   getDisplayName: getNotificationDisplayName,
 } = require('../services/notificationService');
+const { sendOtpEmail } = require('../services/emailService');
+const { verifyGoogleIdToken } = require('../services/googleAuthService');
+const {
+  createGoogleCompletionToken,
+  createUserFromPending,
+  issueSession,
+  verifyGoogleCompletionToken,
+} = require('../services/authService');
+const {
+  compareOtp,
+  generateOtp,
+  getOtpExpiry,
+  getResendAvailableAt,
+  hashOtp,
+} = require('../utils/otp');
+const {
+  validateEmailRegistration,
+  validateGoogleProfile,
+  validatePasswordReset,
+} = require('../validators/authValidators');
 
 const sanitizeUser = '-password -refreshToken -otp';
 const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
@@ -33,6 +55,15 @@ const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
 const normalizeRole = (role) => String(role || '').trim().toLowerCase();
 const normalizeEmail = (value) => trimString(value).toLowerCase();
 const normalizePhone = (value) => trimString(value);
+
+const setRefreshCookie = (res, refreshToken) => {
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    maxAge: 365 * 24 * 60 * 60 * 1000,
+  });
+};
 
 const getOptionalViewerId = (req) => {
   const token = req.headers.authorization?.startsWith('Bearer')
@@ -281,82 +312,90 @@ const buildStudentFeed = (lawyers, student, distanceLookup = new Map()) => {
   });
 };
 
-const generateTokens = (id, role) => {
-  console.log(`🎫 Tokens requested for: ${id} [${role}]`);
-  const accessToken = jwt.sign({ id, role }, process.env.JWT_SECRET, { expiresIn: '15m' });
-  const refreshToken = jwt.sign({ id }, process.env.JWT_REFRESH_SECRET, { expiresIn: '1y' });
-  return { accessToken, refreshToken };
-};
-
 // 1. REGISTER
 exports.register = async (req, res) => {
   try {
-    const {
-      firstName,
-      lastName,
+    const role = validateEmailRegistration(req.body);
+    const email = normalizeEmail(req.body.email);
+    const phone = normalizePhone(req.body.phone);
+
+    const duplicate = await User.findOne({ $or: [{ email }, { phone }] });
+    if (duplicate) {
+      return res.status(400).json({
+        message: duplicate.email === email ? 'Email already registered' : 'Phone already registered',
+      });
+    }
+
+    const existingPending = await PendingRegistration.findOne({
+      $or: [{ email }, { phone }],
+    }).select('+password +otpHash');
+
+    if (existingPending && existingPending.resendAvailableAt > new Date()) {
+      return res.status(429).json({
+        message: 'Please wait before requesting another verification code',
+        retryAfter: Math.ceil((existingPending.resendAvailableAt.getTime() - Date.now()) / 1000),
+      });
+    }
+
+    const otp = generateOtp();
+    const pendingData = {
+      firstName: trimString(req.body.firstName),
+      lastName: trimString(req.body.lastName),
       email,
       phone,
-      password,
+      password: await bcrypt.hash(req.body.password, 12),
       role,
-      address,
-      barId,
-      specialization,
-      experienceYears,
-      about,
-      languages,
-      consultationFee,
-      collegeName,
-      collegeEmail,
-    } = req.body;
-    
-    const normalizedEmail = normalizeEmail(email);
-    const normalizedPhone = normalizePhone(phone);
-
-    if (normalizedPhone && await User.findOne({ phone: normalizedPhone })) return res.status(400).json({ message: 'Phone exists' });
-    if (normalizedEmail && await User.findOne({ email: normalizedEmail })) return res.status(400).json({ message: 'Email exists' });
-
-    // Removed OTP validation for User and Student as per requirement
-
-    const normalizedRole = normalizeRole(role) || 'user';
-    const userData = {
-      firstName: trimString(firstName),
-      lastName: trimString(lastName),
-      email: normalizedEmail,
-      phone: normalizedPhone,
-      password,
-      role: normalizedRole,
+      phoneVerified: Boolean(req.body.phoneVerified),
+      otpHash: await hashOtp(otp),
+      otpExpiresAt: getOtpExpiry(),
+      resendAvailableAt: getResendAvailableAt(),
+      attemptCount: 0,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
     };
-    
-    if (normalizedRole === 'lawyer') {
-      const normalizedLocation = await resolveLawyerAddress(address || {}, {
-        requireCoordinates: hasManualLocationInput(address || {}),
+
+    if (role === 'lawyer') {
+      const resolvedLocation = await resolveLawyerAddress(req.body.address || {}, {
+        requireCoordinates: hasManualLocationInput(req.body.address || {}),
       });
-      userData.address = normalizedLocation.address;
-      userData.location = normalizedLocation.location;
-      userData.lawyerProfile = { 
-        barId: trimString(barId),
-        specialization: trimString(specialization),
-        experienceYears: Number(experienceYears) || 0,
-        about: trimString(about),
-        languages: normalizeLanguageList(languages),
-        consultationFee: Number(consultationFee) || 500,
-        isVerified: false 
+      pendingData.address = resolvedLocation.address;
+      pendingData.location = resolvedLocation.location;
+      pendingData.lawyerProfile = {
+        barId: trimString(req.body.barId),
+        specialization: trimString(req.body.specialization),
+        experienceYears: Number(req.body.experienceYears) || 0,
+        about: trimString(req.body.about),
+        languages: normalizeLanguageList(req.body.languages),
+        consultationFee: Number(req.body.consultationFee) || 500,
       };
-    } else if (normalizedRole === 'student') {
-      userData.studentProfile = {
-        collegeName: trimString(collegeName),
-        collegeEmail: trimString(collegeEmail),
+    } else if (role === 'student') {
+      pendingData.studentProfile = {
+        collegeName: trimString(req.body.collegeName),
+        collegeEmail: trimString(req.body.collegeEmail),
       };
     }
-    
-    const user = await User.create(userData);
-    const { accessToken, refreshToken } = generateTokens(user._id, user.role);
-    user.refreshToken = refreshToken;
-    await user.save();
 
-    res.status(201).json({ accessToken, user });
-  } catch (error) { 
-    res.status(error.statusCode || 500).json({ message: error.message }); 
+    if (existingPending) {
+      existingPending.set(pendingData);
+      await existingPending.save();
+    } else {
+      await PendingRegistration.create(pendingData);
+    }
+
+    await sendOtpEmail({
+      to: email,
+      otp,
+      firstName: pendingData.firstName,
+      purpose: 'complete your registration',
+    });
+
+    res.status(202).json({
+      message: 'Verification code sent to your email',
+      email,
+      role,
+      resendAfter: 60,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -462,13 +501,10 @@ exports.login = async (req, res) => {
       });
     }
 
-    const { accessToken, refreshToken } = generateTokens(user._id, user.role);
-    user.refreshToken = refreshToken;
-    await user.save();
-
-    res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
+    const session = await issueSession(user);
+    setRefreshCookie(res, session.refreshToken);
     console.log("✅ Login Successful.");
-    res.json({ accessToken, refreshToken, user });
+    res.json(session);
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
@@ -480,7 +516,11 @@ exports.sendOTP = async (req, res) => {
     console.log(`📡 OTP for ${phone}: ${otp}`);
 
     if (isRegister) {
-       await Otp.findOneAndUpdate({ phone }, { otp }, { upsert: true, new: true });
+       await Otp.findOneAndUpdate(
+         { phone },
+         { otp, createdAt: new Date() },
+         { upsert: true, new: true, setDefaultsOnInsert: true }
+       );
     } else {
       const user = await User.findOneAndUpdate(
         { phone },
@@ -493,10 +533,16 @@ exports.sendOTP = async (req, res) => {
   } catch (error) { res.status(500).json({ message: error.message }); }
 };
 
-// 4. VERIFY OTP
-exports.verifyOTP = async (req, res) => {
+exports.verifyPhoneOTP = async (req, res) => {
   try {
     const { phone, otp } = req.body;
+    const registrationOtp = await Otp.findOne({ phone, otp });
+
+    if (registrationOtp) {
+      await registrationOtp.deleteOne();
+      return res.json({ message: 'Mobile number verified', verified: true });
+    }
+
     const requestedRole = normalizeRole(req.body.role);
 
     if (requestedRole && !allowedRoles.includes(requestedRole)) {
@@ -513,12 +559,347 @@ exports.verifyOTP = async (req, res) => {
     }
 
     user.otp = undefined; user.otpExpires = undefined;
-    const { accessToken, refreshToken } = generateTokens(user._id, user.role);
-    user.refreshToken = refreshToken;
-    await user.save();
-    res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
-    res.json({ accessToken, refreshToken, user });
+    const session = await issueSession(user);
+    setRefreshCookie(res, session.refreshToken);
+    res.json(session);
   } catch (error) { res.status(500).json({ message: error.message }); }
+};
+
+// 4. VERIFY REGISTRATION OTP
+exports.verifyOTP = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    if (!email) return exports.verifyPhoneOTP(req, res);
+
+    const role = normalizeRole(req.body.role);
+    const pending = await PendingRegistration.findOne({
+      email,
+      ...(role ? { role } : {}),
+    }).select('+password +otpHash');
+
+    if (!pending) {
+      return res.status(404).json({ message: 'Pending registration not found or expired' });
+    }
+
+    if (pending.attemptCount >= 5) {
+      return res.status(429).json({ message: 'Too many incorrect attempts. Request a new code.' });
+    }
+
+    if (pending.otpExpiresAt <= new Date()) {
+      return res.status(400).json({ message: 'Verification code expired. Request a new code.' });
+    }
+
+    const isValid = await compareOtp(req.body.otp, pending.otpHash);
+    if (!isValid) {
+      pending.attemptCount += 1;
+      await pending.save();
+      return res.status(400).json({ message: 'Invalid verification code' });
+    }
+
+    const user = await createUserFromPending(pending);
+    await PendingRegistration.deleteMany({
+      $or: [{ email: pending.email }, { phone: pending.phone }],
+    });
+
+    const session = await issueSession(user);
+    setRefreshCookie(res, session.refreshToken);
+    res.status(201).json(session);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.resendOTP = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    const pending = await PendingRegistration.findOne({ email }).select('+otpHash');
+
+    if (!pending) {
+      return res.status(404).json({ message: 'Pending registration not found or expired' });
+    }
+
+    if (pending.resendAvailableAt > new Date()) {
+      return res.status(429).json({
+        message: 'Please wait before requesting another verification code',
+        retryAfter: Math.ceil((pending.resendAvailableAt.getTime() - Date.now()) / 1000),
+      });
+    }
+
+    const otp = generateOtp();
+    pending.otpHash = await hashOtp(otp);
+    pending.otpExpiresAt = getOtpExpiry();
+    pending.resendAvailableAt = getResendAvailableAt();
+    pending.attemptCount = 0;
+    pending.expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    await pending.save();
+
+    await sendOtpEmail({
+      to: pending.email,
+      otp,
+      firstName: pending.firstName,
+      purpose: 'complete your registration',
+    });
+
+    res.json({ message: 'A new verification code was sent', resendAfter: 60 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.googleAuth = async (req, res) => {
+  try {
+    let googleProfile;
+
+    if (req.body.completionToken) {
+      googleProfile = verifyGoogleCompletionToken(req.body.completionToken);
+    } else {
+      googleProfile = await verifyGoogleIdToken(req.body.credential);
+
+      if (!googleProfile.emailVerified) {
+        return res.status(400).json({ message: 'Google account email must be verified' });
+      }
+
+      const existingUser = await User.findOne({
+        $or: [{ googleId: googleProfile.googleId }, { email: googleProfile.email }],
+      }).select('+password');
+
+      if (existingUser) {
+        const requestedRole = normalizeRole(req.body.role);
+        if (requestedRole && existingUser.role !== requestedRole) {
+          return res.status(403).json({
+            message: `This account is registered as ${existingUser.role}. Please use the ${existingUser.role} login.`,
+            code: 'ROLE_MISMATCH',
+          });
+        }
+
+        existingUser.googleId = googleProfile.googleId;
+        existingUser.verified = true;
+        existingUser.profilePicture = existingUser.profilePicture || googleProfile.profilePicture;
+        existingUser.profileImage = existingUser.profileImage || googleProfile.profilePicture;
+        existingUser.authProvider = existingUser.password ? 'both' : 'google';
+
+        const session = await issueSession(existingUser);
+        setRefreshCookie(res, session.refreshToken);
+        return res.json(session);
+      }
+
+      return res.status(202).json({
+        requiresProfile: true,
+        completionToken: createGoogleCompletionToken(googleProfile),
+        googleProfile: {
+          email: googleProfile.email,
+          firstName: googleProfile.firstName,
+          lastName: googleProfile.lastName,
+          profilePicture: googleProfile.profilePicture,
+        },
+      });
+    }
+
+    const role = validateGoogleProfile(req.body);
+    const payload = {
+      ...req.body,
+      role,
+      phone: normalizePhone(req.body.phone),
+    };
+
+    const phone = normalizePhone(req.body.phone);
+    const duplicate = await User.findOne({
+      $or: [
+        { email: googleProfile.email },
+        { phone },
+        { googleId: googleProfile.googleId },
+      ],
+    });
+
+    if (duplicate) {
+      return res.status(400).json({
+        message: duplicate.email === googleProfile.email
+          ? 'Email already registered'
+          : duplicate.phone === phone
+            ? 'Phone already registered'
+            : 'Google account already registered',
+      });
+    }
+
+    let resolvedLocation;
+    if (role === 'lawyer') {
+      resolvedLocation = await resolveLawyerAddress(req.body.address || {}, {
+        requireCoordinates: hasManualLocationInput(req.body.address || {}),
+      });
+    }
+
+    const existingPending = await PendingRegistration.findOne({
+      $or: [
+        { email: googleProfile.email },
+        { phone },
+        { googleId: googleProfile.googleId },
+      ],
+    }).select('+password +otpHash');
+
+    if (existingPending && existingPending.resendAvailableAt > new Date()) {
+      return res.status(429).json({
+        message: 'Please wait before requesting another verification code',
+        retryAfter: Math.ceil((existingPending.resendAvailableAt.getTime() - Date.now()) / 1000),
+      });
+    }
+
+    const otp = generateOtp();
+    const pendingData = {
+      firstName: trimString(req.body.firstName || googleProfile.firstName),
+      lastName: trimString(req.body.lastName || googleProfile.lastName),
+      email: googleProfile.email,
+      phone,
+      password: await bcrypt.hash(req.body.password, 12),
+      role,
+      authProvider: 'google',
+      googleId: googleProfile.googleId,
+      profilePicture: googleProfile.profilePicture,
+      phoneVerified: Boolean(req.body.phoneVerified),
+      otpHash: await hashOtp(otp),
+      otpExpiresAt: getOtpExpiry(),
+      resendAvailableAt: getResendAvailableAt(),
+      attemptCount: 0,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+    };
+
+    if (role === 'lawyer') {
+      pendingData.address = resolvedLocation.address;
+      pendingData.location = resolvedLocation.location;
+      pendingData.lawyerProfile = {
+        barId: trimString(req.body.barId),
+        specialization: trimString(req.body.specialization),
+        experienceYears: Number(req.body.experienceYears) || 0,
+        about: trimString(req.body.about),
+        languages: normalizeLanguageList(req.body.languages),
+        consultationFee: Number(req.body.consultationFee) || 500,
+      };
+    } else if (role === 'student') {
+      pendingData.studentProfile = {
+        collegeName: trimString(req.body.collegeName),
+        collegeEmail: trimString(req.body.collegeEmail),
+      };
+    }
+
+    if (existingPending) {
+      existingPending.set(pendingData);
+      await existingPending.save();
+    } else {
+      await PendingRegistration.create(pendingData);
+    }
+
+    await sendOtpEmail({
+      to: googleProfile.email,
+      otp,
+      firstName: pendingData.firstName,
+      purpose: 'finish creating your account',
+    });
+
+    res.status(202).json({
+      message: 'Verification code sent to your email',
+      email: googleProfile.email,
+      role,
+      resendAfter: 60,
+    });
+  } catch (error) {
+    const statusCode = ['JsonWebTokenError', 'TokenExpiredError'].includes(error.name)
+      ? 401
+      : error.statusCode || 500;
+    res.status(statusCode).json({ message: error.message });
+  }
+};
+
+exports.forgotPassword = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    if (!email) return res.status(400).json({ message: 'Email is required' });
+
+    const user = await User.findOne({ email })
+      .select('+resetOtpHash +resetOtpExpiresAt +resetResendAvailableAt +resetAttemptCount');
+
+    if (!user) {
+      return res.json({ message: 'If an account exists, a reset code has been sent.' });
+    }
+
+    if (user.resetResendAvailableAt > new Date()) {
+      return res.status(429).json({
+        message: 'Please wait before requesting another reset code',
+        retryAfter: Math.ceil((user.resetResendAvailableAt.getTime() - Date.now()) / 1000),
+      });
+    }
+
+    const otp = generateOtp();
+    user.resetOtpHash = await hashOtp(otp);
+    user.resetOtpExpiresAt = getOtpExpiry();
+    user.resetResendAvailableAt = getResendAvailableAt();
+    user.resetAttemptCount = 0;
+    await user.save();
+
+    await sendOtpEmail({
+      to: user.email,
+      otp,
+      firstName: user.firstName,
+      purpose: 'reset your password',
+    });
+
+    res.json({ message: 'If an account exists, a reset code has been sent.', resendAfter: 60 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    validatePasswordReset(req.body);
+    const email = normalizeEmail(req.body.email);
+    const user = await User.findOne({ email })
+      .select('+password +resetOtpHash +resetOtpExpiresAt +resetAttemptCount');
+
+    if (!user?.resetOtpHash || user.resetOtpExpiresAt <= new Date()) {
+      return res.status(400).json({ message: 'Reset code is invalid or expired' });
+    }
+
+    if (user.resetAttemptCount >= 5) {
+      return res.status(429).json({ message: 'Too many incorrect attempts. Request a new code.' });
+    }
+
+    if (!(await compareOtp(req.body.otp, user.resetOtpHash))) {
+      user.resetAttemptCount += 1;
+      await user.save();
+      return res.status(400).json({ message: 'Reset code is invalid or expired' });
+    }
+
+    user.password = req.body.password;
+    user.authProvider = user.googleId ? 'both' : 'email';
+    user.verified = true;
+    user.refreshToken = undefined;
+    user.resetOtpHash = undefined;
+    user.resetOtpExpiresAt = undefined;
+    user.resetResendAvailableAt = undefined;
+    user.resetAttemptCount = 0;
+    await user.save();
+
+    res.json({ message: 'Password reset successful' });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.logout = async (req, res) => {
+  try {
+    const refreshToken = req.body?.refreshToken || req.cookies.refreshToken;
+    if (refreshToken) {
+      await User.updateOne({ refreshToken }, { $unset: { refreshToken: 1 } });
+    }
+
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    });
+    res.json({ message: 'Logged out' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
 
 // 5. REFRESH TOKEN

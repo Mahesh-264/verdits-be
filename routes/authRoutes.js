@@ -3,6 +3,11 @@ const multer = require('multer');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const {
+  authLimiter,
+  loginLimiter,
+  otpLimiter,
+} = require('../middleware/authRateLimiters');
 
 const resumeUpload = multer({
   storage: multer.memoryStorage(),
@@ -23,13 +28,19 @@ const resumeUpload = multer({
   },
 });
 
-router.post('/register', authController.register);
-router.post('/login', authController.login);
+router.post('/register', authLimiter, authController.register);
+router.post('/login', loginLimiter, authController.login);
+router.post('/google', loginLimiter, authController.googleAuth);
+router.post('/forgot-password', otpLimiter, authController.forgotPassword);
+router.post('/reset-password', otpLimiter, authController.resetPassword);
+router.post('/logout', authController.logout);
 router.get('/location/pincode/:pincode', authController.lookupPincode);
 router.post('/location/geocode', authController.geocodeRegistrationAddress);
 router.get('/location/reverse-geocode', authController.reverseGeocodeRegistrationAddress);
-router.post('/send-otp', authController.sendOTP);
-router.post('/verify-otp', authController.verifyOTP);
+router.post('/send-otp', otpLimiter, authController.sendOTP);
+router.post('/verify-phone-otp', otpLimiter, authController.verifyPhoneOTP);
+router.post('/verify-otp', otpLimiter, authController.verifyOTP);
+router.post('/resend-otp', otpLimiter, authController.resendOTP);
 router.post('/refresh', authController.refresh);
 router.get('/published-internships', authController.getPublishedInternships);
 router.get('/published-jam-sessions', authController.getPublishedJamSessions);
