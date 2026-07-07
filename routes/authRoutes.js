@@ -31,6 +31,12 @@ const resumeUpload = multer({
 router.post('/register', authLimiter, authController.register);
 router.post('/login', loginLimiter, authController.login);
 router.post('/google', loginLimiter, authController.googleAuth);
+router.post('/registration/check-email', authLimiter, authController.checkEmailAvailability);
+router.post('/registration/send-email-otp', otpLimiter, authController.sendEmailVerification);
+router.post('/registration/verify-email-otp', otpLimiter, authController.verifyEmailVerification);
+router.post('/registration/check-phone', authLimiter, authController.checkPhoneAvailability);
+router.post('/registration/send-phone-otp', otpLimiter, authController.sendPhoneVerification);
+router.post('/registration/verify-phone-otp', otpLimiter, authController.verifyPhoneVerification);
 router.post('/forgot-password', otpLimiter, authController.forgotPassword);
 router.post('/reset-password', otpLimiter, authController.resetPassword);
 router.post('/logout', authController.logout);

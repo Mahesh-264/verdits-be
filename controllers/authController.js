@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Otp = require('../models/Otp');
 const PendingRegistration = require('../models/PendingRegistration');
+const VerificationOtp = require('../models/VerificationOtp');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cloudinary = require('../config/cloudinary');
@@ -55,6 +56,25 @@ const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
 const normalizeRole = (role) => String(role || '').trim().toLowerCase();
 const normalizeEmail = (value) => trimString(value).toLowerCase();
 const normalizePhone = (value) => trimString(value);
+const isEmailAddress = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const isMobileNumber = (value) => /^\+?[0-9]{10,15}$/.test(String(value || '').replace(/[\s-]/g, ''));
+
+const normalizeVerificationTarget = (channel, value) => (
+  channel === 'email' ? normalizeEmail(value) : normalizePhone(value).replace(/[\s-]/g, '')
+);
+
+const findVerifiedContact = ({ channel, target, role }) => VerificationOtp.findOne({
+  channel,
+  target,
+  role,
+  verified: true,
+  expiresAt: { $gt: new Date() },
+});
+
+const sendSmsOtp = async ({ to, otp }) => {
+  // Provider hook: integrate Twilio, MSG91, etc. here.
+  console.log(`SMS OTP for ${to}: ${otp}`);
+};
 
 const setRefreshCookie = (res, refreshToken) => {
   res.cookie('refreshToken', refreshToken, {
@@ -283,6 +303,225 @@ const uploadResumeToCloudinary = (file) => (
   })
 );
 
+const checkRegistrationContact = async ({ channel, value, role }) => {
+  const selectedRole = normalizeRole(role) || 'user';
+  if (!['user', 'lawyer', 'student'].includes(selectedRole)) {
+    const error = new Error('Invalid role selected');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const target = normalizeVerificationTarget(channel, value);
+  if (!target) {
+    const error = new Error(channel === 'email' ? 'Email is required' : 'Mobile number is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (channel === 'email' && !isEmailAddress(target)) {
+    const error = new Error('Invalid email');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (channel === 'phone' && !isMobileNumber(target)) {
+    const error = new Error('Invalid mobile number');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const duplicate = await User.findOne(channel === 'email' ? { email: target } : { phone: target });
+  if (duplicate) {
+    const error = new Error(channel === 'email' ? 'Email already registered' : 'Mobile number already registered');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return { role: selectedRole, target };
+};
+
+const sendRegistrationVerification = async ({ channel, value, role, firstName }) => {
+  const checked = await checkRegistrationContact({ channel, value, role });
+  const existing = await VerificationOtp.findOne({
+    channel,
+    target: checked.target,
+    role: checked.role,
+  }).select('+otpHash');
+
+  if (existing?.resendAvailableAt > new Date()) {
+    const error = new Error('Too many OTP requests. Please wait before requesting another code.');
+    error.statusCode = 429;
+    error.retryAfter = Math.ceil((existing.resendAvailableAt.getTime() - Date.now()) / 1000);
+    throw error;
+  }
+
+  const otp = generateOtp();
+  const verificationData = {
+    channel,
+    target: checked.target,
+    role: checked.role,
+    otpHash: await hashOtp(otp),
+    otpExpiresAt: getOtpExpiry(),
+    resendAvailableAt: getResendAvailableAt(),
+    attemptCount: 0,
+    verified: false,
+    verifiedAt: undefined,
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+  };
+
+  if (existing) {
+    existing.set(verificationData);
+    await existing.save();
+  } else {
+    await VerificationOtp.create(verificationData);
+  }
+
+  if (channel === 'email') {
+    await sendOtpEmail({
+      to: checked.target,
+      otp,
+      firstName,
+      purpose: 'verify your email address',
+    });
+  } else {
+    await sendSmsOtp({ to: checked.target, otp });
+  }
+
+  return checked;
+};
+
+const verifyRegistrationContactOtp = async ({ channel, value, role, otp }) => {
+  const selectedRole = normalizeRole(role) || 'user';
+  const target = normalizeVerificationTarget(channel, value);
+  const verification = await VerificationOtp.findOne({
+    channel,
+    target,
+    role: selectedRole,
+  }).select('+otpHash');
+
+  if (!verification) {
+    const error = new Error('OTP expired');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (verification.attemptCount >= 5) {
+    const error = new Error('Too many OTP requests');
+    error.statusCode = 429;
+    throw error;
+  }
+
+  if (!verification.otpHash || verification.otpExpiresAt <= new Date()) {
+    const error = new Error('OTP expired');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!(await compareOtp(otp, verification.otpHash))) {
+    verification.attemptCount += 1;
+    await verification.save();
+    const error = new Error('Incorrect OTP');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  verification.verified = true;
+  verification.verifiedAt = new Date();
+  verification.otpHash = undefined;
+  verification.otpExpiresAt = undefined;
+  verification.attemptCount = 0;
+  verification.expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  await verification.save();
+  return verification;
+};
+
+exports.checkEmailAvailability = async (req, res) => {
+  try {
+    const { target } = await checkRegistrationContact({
+      channel: 'email',
+      value: req.body.email,
+      role: req.body.role,
+    });
+    res.json({ available: true, email: target, message: 'Email is available' });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.sendEmailVerification = async (req, res) => {
+  try {
+    const { target } = await sendRegistrationVerification({
+      channel: 'email',
+      value: req.body.email,
+      role: req.body.role,
+      firstName: req.body.firstName,
+    });
+    res.json({ message: 'OTP sent to your email', email: target, resendAfter: 30 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      message: error.message,
+      retryAfter: error.retryAfter,
+    });
+  }
+};
+
+exports.verifyEmailVerification = async (req, res) => {
+  try {
+    await verifyRegistrationContactOtp({
+      channel: 'email',
+      value: req.body.email,
+      role: req.body.role,
+      otp: req.body.otp,
+    });
+    res.json({ message: 'Verification successful', verified: true });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.checkPhoneAvailability = async (req, res) => {
+  try {
+    const { target } = await checkRegistrationContact({
+      channel: 'phone',
+      value: req.body.phone,
+      role: req.body.role,
+    });
+    res.json({ available: true, phone: target, message: 'Mobile number is available' });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.sendPhoneVerification = async (req, res) => {
+  try {
+    const { target } = await sendRegistrationVerification({
+      channel: 'phone',
+      value: req.body.phone,
+      role: req.body.role,
+    });
+    res.json({ message: 'OTP sent to your mobile number', phone: target, resendAfter: 30 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      message: error.message,
+      retryAfter: error.retryAfter,
+    });
+  }
+};
+
+exports.verifyPhoneVerification = async (req, res) => {
+  try {
+    await verifyRegistrationContactOtp({
+      channel: 'phone',
+      value: req.body.phone,
+      role: req.body.role,
+      otp: req.body.otp,
+    });
+    res.json({ message: 'Verification successful', verified: true });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
 const buildStudentFeed = (lawyers, student, distanceLookup = new Map()) => {
   const appliedIds = getStudentApplicationIds(student);
   const joinedIds = getJoinedJamSessionIds(student);
@@ -326,40 +565,36 @@ exports.register = async (req, res) => {
       });
     }
 
-    const existingPending = await PendingRegistration.findOne({
-      $or: [{ email }, { phone }],
-    }).select('+password +otpHash');
+    const [emailVerification, phoneVerification] = await Promise.all([
+      findVerifiedContact({ channel: 'email', target: email, role }),
+      findVerifiedContact({ channel: 'phone', target: phone, role }),
+    ]);
 
-    if (existingPending && existingPending.resendAvailableAt > new Date()) {
-      return res.status(429).json({
-        message: 'Please wait before requesting another verification code',
-        retryAfter: Math.ceil((existingPending.resendAvailableAt.getTime() - Date.now()) / 1000),
-      });
+    if (!emailVerification) {
+      return res.status(400).json({ message: 'Email must be verified before creating an account' });
     }
 
-    const otp = generateOtp();
-    const pendingData = {
+    if (!phoneVerification) {
+      return res.status(400).json({ message: 'Mobile number must be verified before creating an account' });
+    }
+
+    const userData = {
       firstName: trimString(req.body.firstName),
       lastName: trimString(req.body.lastName),
       email,
       phone,
       password: await bcrypt.hash(req.body.password, 12),
       role,
-      phoneVerified: Boolean(req.body.phoneVerified),
-      otpHash: await hashOtp(otp),
-      otpExpiresAt: getOtpExpiry(),
-      resendAvailableAt: getResendAvailableAt(),
-      attemptCount: 0,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      authProvider: 'email',
     };
 
     if (role === 'lawyer') {
       const resolvedLocation = await resolveLawyerAddress(req.body.address || {}, {
         requireCoordinates: hasManualLocationInput(req.body.address || {}),
       });
-      pendingData.address = resolvedLocation.address;
-      pendingData.location = resolvedLocation.location;
-      pendingData.lawyerProfile = {
+      userData.address = resolvedLocation.address;
+      userData.location = resolvedLocation.location;
+      userData.lawyerProfile = {
         barId: trimString(req.body.barId),
         specialization: trimString(req.body.specialization),
         experienceYears: Number(req.body.experienceYears) || 0,
@@ -368,32 +603,19 @@ exports.register = async (req, res) => {
         consultationFee: Number(req.body.consultationFee) || 500,
       };
     } else if (role === 'student') {
-      pendingData.studentProfile = {
+      userData.studentProfile = {
         collegeName: trimString(req.body.collegeName),
         collegeEmail: trimString(req.body.collegeEmail),
       };
     }
 
-    if (existingPending) {
-      existingPending.set(pendingData);
-      await existingPending.save();
-    } else {
-      await PendingRegistration.create(pendingData);
-    }
+    const user = await createUserFromPending(userData);
+    await VerificationOtp.deleteMany({ $or: [{ target: email }, { target: phone }] });
+    await PendingRegistration.deleteMany({ $or: [{ email }, { phone }] });
+    const session = await issueSession(user);
+    setRefreshCookie(res, session.refreshToken);
 
-    await sendOtpEmail({
-      to: email,
-      otp,
-      firstName: pendingData.firstName,
-      purpose: 'complete your registration',
-    });
-
-    res.status(202).json({
-      message: 'Verification code sent to your email',
-      email,
-      role,
-      resendAfter: 60,
-    });
+    res.status(201).json(session);
   } catch (error) {
     res.status(error.statusCode || 500).json({ message: error.message });
   }
@@ -728,23 +950,12 @@ exports.googleAuth = async (req, res) => {
       });
     }
 
-    const existingPending = await PendingRegistration.findOne({
-      $or: [
-        { email: googleProfile.email },
-        { phone },
-        { googleId: googleProfile.googleId },
-      ],
-    }).select('+password +otpHash');
-
-    if (existingPending && existingPending.resendAvailableAt > new Date()) {
-      return res.status(429).json({
-        message: 'Please wait before requesting another verification code',
-        retryAfter: Math.ceil((existingPending.resendAvailableAt.getTime() - Date.now()) / 1000),
-      });
+    const phoneVerification = await findVerifiedContact({ channel: 'phone', target: phone, role });
+    if (!phoneVerification) {
+      return res.status(400).json({ message: 'Mobile number must be verified before creating an account' });
     }
 
-    const otp = generateOtp();
-    const pendingData = {
+    const userData = {
       firstName: trimString(req.body.firstName || googleProfile.firstName),
       lastName: trimString(req.body.lastName || googleProfile.lastName),
       email: googleProfile.email,
@@ -754,18 +965,12 @@ exports.googleAuth = async (req, res) => {
       authProvider: 'google',
       googleId: googleProfile.googleId,
       profilePicture: googleProfile.profilePicture,
-      phoneVerified: Boolean(req.body.phoneVerified),
-      otpHash: await hashOtp(otp),
-      otpExpiresAt: getOtpExpiry(),
-      resendAvailableAt: getResendAvailableAt(),
-      attemptCount: 0,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
     };
 
     if (role === 'lawyer') {
-      pendingData.address = resolvedLocation.address;
-      pendingData.location = resolvedLocation.location;
-      pendingData.lawyerProfile = {
+      userData.address = resolvedLocation.address;
+      userData.location = resolvedLocation.location;
+      userData.lawyerProfile = {
         barId: trimString(req.body.barId),
         specialization: trimString(req.body.specialization),
         experienceYears: Number(req.body.experienceYears) || 0,
@@ -774,32 +979,25 @@ exports.googleAuth = async (req, res) => {
         consultationFee: Number(req.body.consultationFee) || 500,
       };
     } else if (role === 'student') {
-      pendingData.studentProfile = {
+      userData.studentProfile = {
         collegeName: trimString(req.body.collegeName),
         collegeEmail: trimString(req.body.collegeEmail),
       };
     }
 
-    if (existingPending) {
-      existingPending.set(pendingData);
-      await existingPending.save();
-    } else {
-      await PendingRegistration.create(pendingData);
-    }
-
-    await sendOtpEmail({
-      to: googleProfile.email,
-      otp,
-      firstName: pendingData.firstName,
-      purpose: 'finish creating your account',
+    const user = await createUserFromPending(userData);
+    await VerificationOtp.deleteMany({ $or: [{ target: googleProfile.email }, { target: phone }] });
+    await PendingRegistration.deleteMany({
+      $or: [
+        { email: googleProfile.email },
+        { phone },
+        { googleId: googleProfile.googleId },
+      ],
     });
+    const session = await issueSession(user);
+    setRefreshCookie(res, session.refreshToken);
 
-    res.status(202).json({
-      message: 'Verification code sent to your email',
-      email: googleProfile.email,
-      role,
-      resendAfter: 60,
-    });
+    res.status(201).json(session);
   } catch (error) {
     const statusCode = ['JsonWebTokenError', 'TokenExpiredError'].includes(error.name)
       ? 401

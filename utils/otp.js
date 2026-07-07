@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 
 const OTP_TTL_MS = 5 * 60 * 1000;
-const RESEND_WAIT_MS = 60 * 1000;
+const RESEND_WAIT_MS = 30 * 1000;
 
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
