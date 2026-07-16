@@ -1,5 +1,5 @@
-const { GoogleGenAI } = require("@google/genai");
 const User = require("../models/User");
+const { generateGeminiText } = require("../services/geminiService");
 
 const VALID_CATEGORIES = [
   "criminal",
@@ -17,7 +17,6 @@ const NON_LEGAL_REPLY =
   "I can only help with legal questions. Please ask about a legal issue such as contracts, property, family matters, criminal law, cyber fraud, employment, or court procedures.";
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const AI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 15000);
 const AI_MAX_RETRIES = 1;
 
 const CATEGORY_ALIASES = {
@@ -30,29 +29,8 @@ const CATEGORY_ALIASES = {
   other: ["other"],
 };
 
-const getGeminiClient = () => {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is missing");
-  }
-
-  return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-  });
-};
-
 const escapeRegex = (value = "") =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const withTimeout = (promise, ms, label = "Operation") =>
-  Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      const timeout = setTimeout(() => {
-        clearTimeout(timeout);
-        reject(new Error(`${label} timed out after ${ms}ms`));
-      }, ms);
-    }),
-  ]);
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -144,26 +122,6 @@ const detectCategoryFromText = (text = "") => {
   return "other";
 };
 
-const extractTextFromResponse = (response) => {
-  const directText = response?.text;
-  if (typeof directText === "string" && directText.trim()) {
-    return directText.trim();
-  }
-
-  const candidateText = response?.candidates?.[0]?.content?.parts
-    ?.map((part) => part?.text || "")
-    .join("")
-    .trim();
-
-  if (candidateText) {
-    return candidateText;
-  }
-
-  throw new Error(
-    `Gemini returned empty content: ${JSON.stringify(response || {}).slice(0, 1000)}`
-  );
-};
-
 const extractJsonObject = (value = "") => {
   const trimmed = String(value).trim();
 
@@ -224,54 +182,6 @@ User legal question:
 ${message}
 `.trim();
 
-const buildNoticePrompt = ({ documentType, details, lawyer }) => `
-You are Lawin AI drafting assistant for an Indian lawyer.
-
-Draft a professional ${documentType} using the facts below.
-
-Rules:
-- Return only the final document text.
-- Do not use markdown fences.
-- Use formal legal notice style suitable for India.
-- Include placeholders like [date] only when the fact is missing.
-- Keep the language clear, assertive, and editable.
-- Do not invent case numbers, addresses, statutes, or dates that were not provided.
-- Add a short "Subject" line.
-- Add numbered paragraphs and a clear demand/compliance section.
-- End with "For and on behalf of" and the lawyer details if available.
-
-Lawyer:
-Name: ${lawyer?.name || [lawyer?.firstName, lawyer?.lastName].filter(Boolean).join(" ").trim() || "Advocate"}
-Specialization: ${lawyer?.lawyerProfile?.specialization || "Legal Practice"}
-Bar Council ID: ${lawyer?.lawyerProfile?.barId || ""}
-Location: ${lawyer?.address?.city || lawyer?.address?.district || lawyer?.address?.state || ""}
-
-Document facts:
-${details}
-`.trim();
-
-const buildNoticeEditPrompt = ({ documentType, currentDraft, editInstruction, lawyer }) => `
-You are Lawin AI drafting assistant for an Indian lawyer.
-
-Revise the existing ${documentType || "legal notice"} according to the lawyer's edit instruction.
-
-Rules:
-- Return only the revised full document text.
-- Preserve useful legal structure and formal tone.
-- Apply the requested changes exactly.
-- Do not add facts that are not in the current draft or instruction.
-- Do not use markdown fences.
-
-Lawyer:
-Name: ${lawyer?.name || [lawyer?.firstName, lawyer?.lastName].filter(Boolean).join(" ").trim() || "Advocate"}
-
-Edit instruction:
-${editInstruction}
-
-Current draft:
-${currentDraft}
-`.trim();
-
 const buildLawyerRegex = (category) => {
   const aliases = CATEGORY_ALIASES[category] || [category];
   return new RegExp(aliases.map(escapeRegex).join("|"), "i");
@@ -304,54 +214,17 @@ const fetchSuggestedLawyers = async (category) => {
 };
 
 const callGeminiOnce = async (message) => {
-  const ai = getGeminiClient();
-
-  const response = await withTimeout(
-    ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: buildPrompt(message) }],
-        },
-      ],
-      config: {
-        temperature: 0.1,
-        responseMimeType: "application/json",
-      },
-    }),
-    AI_TIMEOUT_MS,
-    "Gemini request"
-  );
-
-  const rawText = extractTextFromResponse(response);
+  const rawText = await generateGeminiText({
+    prompt: buildPrompt(message),
+    temperature: 0.1,
+    responseMimeType: "application/json",
+  });
   const parsed = extractJsonObject(rawText);
 
   return {
     rawText,
     parsed,
   };
-};
-
-const callGeminiText = async (prompt, temperature = 0.2) => {
-  const ai = getGeminiClient();
-
-  const response = await withTimeout(
-    ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }],
-        },
-      ],
-      config: { temperature },
-    }),
-    AI_TIMEOUT_MS,
-    "Gemini notice request"
-  );
-
-  return extractTextFromResponse(response);
 };
 
 const getAICompletion = async (message) => {
@@ -454,53 +327,3 @@ exports.chatWithAI = async (req, res) => {
   }
 };
 
-exports.generateNoticeDraft = async (req, res) => {
-  try {
-    if (req.user?.role !== "lawyer") {
-      return res.status(403).json({ message: "Only lawyers can generate legal notices" });
-    }
-
-    const documentType = String(req.body?.documentType || "").trim();
-    const details = String(req.body?.details || "").trim();
-
-    if (!documentType || !details) {
-      return res.status(400).json({ message: "Document type and details are required" });
-    }
-
-    const draft = await callGeminiText(
-      buildNoticePrompt({ documentType, details, lawyer: req.user }),
-      0.15
-    );
-
-    res.json({ documentType, draft });
-  } catch (error) {
-    console.error("[AI] notice generation failed:", error?.message || error);
-    res.status(500).json({ message: "Failed to generate notice draft" });
-  }
-};
-
-exports.editNoticeDraft = async (req, res) => {
-  try {
-    if (req.user?.role !== "lawyer") {
-      return res.status(403).json({ message: "Only lawyers can edit legal notices" });
-    }
-
-    const documentType = String(req.body?.documentType || "").trim();
-    const currentDraft = String(req.body?.currentDraft || "").trim();
-    const editInstruction = String(req.body?.editInstruction || "").trim();
-
-    if (!currentDraft || !editInstruction) {
-      return res.status(400).json({ message: "Current draft and edit instruction are required" });
-    }
-
-    const draft = await callGeminiText(
-      buildNoticeEditPrompt({ documentType, currentDraft, editInstruction, lawyer: req.user }),
-      0.1
-    );
-
-    res.json({ documentType, draft });
-  } catch (error) {
-    console.error("[AI] notice edit failed:", error?.message || error);
-    res.status(500).json({ message: "Failed to edit notice draft" });
-  }
-};

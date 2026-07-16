@@ -49,6 +49,7 @@ const {
   validateGoogleProfile,
   validatePasswordReset,
 } = require('../validators/authValidators');
+const { AUTH_CODES, authError, sendAuthError, sendAuthSuccess } = require('../utils/authResponse');
 
 const sanitizeUser = '-password -refreshToken -otp';
 const allowedRoles = ['user', 'lawyer', 'student', 'admin'];
@@ -315,25 +316,33 @@ const checkRegistrationContact = async ({ channel, value, role }) => {
   if (!target) {
     const error = new Error(channel === 'email' ? 'Email is required' : 'Mobile number is required');
     error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = channel;
     throw error;
   }
 
   if (channel === 'email' && !isEmailAddress(target)) {
     const error = new Error('Invalid email');
     error.statusCode = 400;
+    error.code = 'INVALID_EMAIL';
+    error.field = 'email';
     throw error;
   }
 
   if (channel === 'phone' && !isMobileNumber(target)) {
     const error = new Error('Invalid mobile number');
     error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = 'phone';
     throw error;
   }
 
   const duplicate = await User.findOne(channel === 'email' ? { email: target } : { phone: target });
   if (duplicate) {
     const error = new Error(channel === 'email' ? 'Email already registered' : 'Mobile number already registered');
-    error.statusCode = 400;
+    error.statusCode = 409;
+    error.code = channel === 'email' ? 'EMAIL_ALREADY_EXISTS' : 'PHONE_ALREADY_EXISTS';
+    error.field = channel;
     throw error;
   }
 
@@ -351,6 +360,7 @@ const sendRegistrationVerification = async ({ channel, value, role, firstName })
   if (existing?.resendAvailableAt > new Date()) {
     const error = new Error('Too many OTP requests. Please wait before requesting another code.');
     error.statusCode = 429;
+    error.code = 'TOO_MANY_ATTEMPTS';
     error.retryAfter = Math.ceil((existing.resendAvailableAt.getTime() - Date.now()) / 1000);
     throw error;
   }
@@ -401,19 +411,25 @@ const verifyRegistrationContactOtp = async ({ channel, value, role, otp }) => {
 
   if (!verification) {
     const error = new Error('OTP expired');
-    error.statusCode = 404;
+    error.statusCode = 422;
+    error.code = 'OTP_EXPIRED';
+    error.field = 'otp';
     throw error;
   }
 
   if (verification.attemptCount >= 5) {
     const error = new Error('Too many OTP requests');
     error.statusCode = 429;
+    error.code = 'TOO_MANY_ATTEMPTS';
+    error.field = 'otp';
     throw error;
   }
 
   if (!verification.otpHash || verification.otpExpiresAt <= new Date()) {
     const error = new Error('OTP expired');
-    error.statusCode = 400;
+    error.statusCode = 422;
+    error.code = verification.verified ? 'OTP_USED' : 'OTP_EXPIRED';
+    error.field = 'otp';
     throw error;
   }
 
@@ -421,7 +437,9 @@ const verifyRegistrationContactOtp = async ({ channel, value, role, otp }) => {
     verification.attemptCount += 1;
     await verification.save();
     const error = new Error('Incorrect OTP');
-    error.statusCode = 400;
+    error.statusCode = 422;
+    error.code = 'OTP_INVALID';
+    error.field = 'otp';
     throw error;
   }
 
@@ -559,11 +577,11 @@ exports.register = async (req, res) => {
     const phone = normalizePhone(req.body.phone);
 
     const duplicate = await User.findOne({ $or: [{ email }, { phone }] });
-    if (duplicate) {
-      return res.status(400).json({
-        message: duplicate.email === email ? 'Email already registered' : 'Phone already registered',
-      });
-    }
+    if (duplicate) throw authError(
+      duplicate.email === email ? AUTH_CODES.EMAIL_ALREADY_EXISTS : AUTH_CODES.PHONE_ALREADY_EXISTS,
+      duplicate.email === email ? 'An account already uses this email address.' : 'An account already uses this phone number.',
+      { status: 409, field: duplicate.email === email ? 'email' : 'phone' }
+    );
 
     const [emailVerification, phoneVerification] = await Promise.all([
       findVerifiedContact({ channel: 'email', target: email, role }),
@@ -571,11 +589,11 @@ exports.register = async (req, res) => {
     ]);
 
     if (!emailVerification) {
-      return res.status(400).json({ message: 'Email must be verified before creating an account' });
+      throw authError(AUTH_CODES.EMAIL_NOT_VERIFIED, 'Please verify your email address before creating an account.', { status: 403, field: 'email' });
     }
 
     if (!phoneVerification) {
-      return res.status(400).json({ message: 'Mobile number must be verified before creating an account' });
+      throw authError(AUTH_CODES.PHONE_NOT_VERIFIED, 'Please verify your phone number before creating an account.', { status: 403, field: 'phone' });
     }
 
     const userData = {
@@ -615,9 +633,17 @@ exports.register = async (req, res) => {
     const session = await issueSession(user);
     setRefreshCookie(res, session.refreshToken);
 
-    res.status(201).json(session);
+    sendAuthSuccess(res, 201, { code: 'ACCOUNT_CREATED', message: 'Account created successfully.', ...session });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ message: error.message });
+    if (error?.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || 'email';
+      return sendAuthError(res, authError(
+        field === 'phone' ? AUTH_CODES.PHONE_ALREADY_EXISTS : AUTH_CODES.EMAIL_ALREADY_EXISTS,
+        field === 'phone' ? 'An account already uses this phone number.' : 'An account already uses this email address.',
+        { status: 409, field }
+      ));
+    }
+    sendAuthError(res, error);
   }
 };
 
@@ -667,6 +693,36 @@ exports.reverseGeocodeRegistrationAddress = async (req, res) => {
 // 2. LOGIN
 exports.login = async (req, res) => {
   try {
+    const { email: rawEmail, password, role: rawRole } = req.body;
+    if (typeof rawRole !== 'string' || !rawRole.trim()) throw authError(AUTH_CODES.VALIDATION_ERROR, 'Please select a role.', { field: 'role' });
+    if (typeof rawEmail !== 'string' || !rawEmail.trim()) throw authError(AUTH_CODES.VALIDATION_ERROR, 'Email is required.', { field: 'email' });
+    if (typeof password !== 'string' || !password.trim()) throw authError(AUTH_CODES.VALIDATION_ERROR, 'Password is required.', { field: 'password' });
+
+    const requestedRole = normalizeRole(rawRole);
+    const email = normalizeEmail(rawEmail);
+    if (!allowedRoles.includes(requestedRole)) throw authError(AUTH_CODES.VALIDATION_ERROR, 'Please select a valid role.', { field: 'role' });
+    if (!isEmailAddress(email)) throw authError(AUTH_CODES.INVALID_EMAIL, 'Enter a valid email address.', { field: 'email' });
+
+    const authenticatedUser = await User.findOne({ email }).select('+password');
+    if (!authenticatedUser) throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
+    if (authenticatedUser.role !== requestedRole) {
+      const roleLabel = authenticatedUser.role === 'user' ? 'Client' : `${authenticatedUser.role.charAt(0).toUpperCase()}${authenticatedUser.role.slice(1)}`;
+      throw authError(AUTH_CODES.ROLE_MISMATCH, `This email is registered as a ${roleLabel}.`, { status: 403, field: 'role' });
+    }
+    const accountStatus = authenticatedUser.accountStatus || 'active';
+    if (accountStatus === 'blocked') throw authError(AUTH_CODES.ACCOUNT_BLOCKED, 'This account has been blocked.', { status: 403 });
+    if (accountStatus === 'suspended') throw authError(AUTH_CODES.ACCOUNT_SUSPENDED, 'This account has been suspended.', { status: 403 });
+    if (accountStatus === 'deleted') throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
+    if (accountStatus === 'pending_approval') throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your account is pending administrator approval.', { status: 403 });
+    if (authenticatedUser.emailVerified === false || authenticatedUser.verified === false) throw authError(AUTH_CODES.EMAIL_NOT_VERIFIED, 'Please verify your email address before logging in.', { status: 403, field: 'email' });
+    if (authenticatedUser.phoneVerified === false) throw authError(AUTH_CODES.PHONE_NOT_VERIFIED, 'Please verify your phone number before logging in.', { status: 403, field: 'phone' });
+    if (!authenticatedUser.password || !(await authenticatedUser.matchPassword(password))) throw authError(AUTH_CODES.WRONG_PASSWORD, 'Incorrect password.', { status: 401, field: 'password' });
+
+    const session = await issueSession(authenticatedUser);
+    setRefreshCookie(res, session.refreshToken);
+    return sendAuthSuccess(res, 200, { code: AUTH_CODES.LOGIN_SUCCESS, message: 'Login successful.', ...session });
+
+    {
     const normalizedEmail = normalizeEmail(req.body.email);
     const normalizedPhone = normalizePhone(req.body.phone);
     const password = String(req.body.password || '');
@@ -727,7 +783,8 @@ exports.login = async (req, res) => {
     setRefreshCookie(res, session.refreshToken);
     console.log("✅ Login Successful.");
     res.json(session);
-  } catch (error) { res.status(500).json({ message: error.message }); }
+    }
+  } catch (error) { sendAuthError(res, error); }
 };
 
 // 3. SEND OTP
@@ -784,7 +841,7 @@ exports.verifyPhoneOTP = async (req, res) => {
     const session = await issueSession(user);
     setRefreshCookie(res, session.refreshToken);
     res.json(session);
-  } catch (error) { res.status(500).json({ message: error.message }); }
+  } catch (error) { sendAuthError(res, error); }
 };
 
 // 4. VERIFY REGISTRATION OTP

@@ -7,12 +7,16 @@ const normalizeRole = (role) => String(role || '').trim().toLowerCase();
 const normalizeEmail = (value) => trimString(value).toLowerCase();
 const normalizePhone = (value) => trimString(value);
 const isEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const isPhone = (value) => /^\+?[0-9]{10,15}$/.test(String(value || '').replace(/[\s-]/g, ''));
+const isScalar = (value) => typeof value === 'string' || typeof value === 'number';
 
 const requireFields = (payload, fields) => {
-  const missing = fields.filter((field) => !trimString(payload[field]));
+  const missing = fields.filter((field) => !isScalar(payload[field]) || !trimString(payload[field]));
   if (missing.length) {
     const error = new Error(`${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} required`);
     error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = missing[0];
     throw error;
   }
 };
@@ -28,10 +32,10 @@ const validateRoleFields = (body, role) => {
 };
 
 const validateEmailRegistration = (body) => {
-  const role = normalizeRole(body.role) || 'user';
+  const role = normalizeRole(body.role);
 
-  if (!registrationRoles.includes(role)) {
-    const error = new Error('Invalid role selected');
+  if (!role || !registrationRoles.includes(role)) {
+    const error = new Error(!role ? 'Please select a role.' : 'Invalid role selected.');
     error.statusCode = 400;
     throw error;
   }
@@ -39,13 +43,21 @@ const validateEmailRegistration = (body) => {
   requireFields(body, ['firstName', 'lastName', 'email', 'phone', 'password', 'confirmPassword']);
 
   if (!isEmail(normalizeEmail(body.email))) {
-    const error = new Error('Enter a valid email address');
+    const error = new Error('Enter a valid email address.');
     error.statusCode = 400;
     throw error;
   }
 
-  if (String(body.password).length < 8) {
-    const error = new Error('Password must be at least 8 characters');
+  if (!isPhone(normalizePhone(body.phone))) {
+    const error = new Error('Enter a valid phone number.');
+    error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = 'phone';
+    throw error;
+  }
+
+  if (String(body.password).length < 8 || !/[A-Za-z]/.test(body.password) || !/\d/.test(body.password)) {
+    const error = new Error('Password must be at least 8 characters and include a letter and number.');
     error.statusCode = 400;
     throw error;
   }

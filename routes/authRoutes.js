@@ -3,6 +3,7 @@ const multer = require('multer');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const rejectUnsafeAuthInput = require('../middleware/rejectUnsafeAuthInput');
 const {
   authLimiter,
   loginLimiter,
@@ -26,6 +27,26 @@ const resumeUpload = multer({
 
     callback(new Error('Resume must be a PDF, DOC, or DOCX file'));
   },
+});
+
+router.use(rejectUnsafeAuthInput);
+router.use((req, res, next) => {
+  const sendJson = res.json.bind(res);
+  res.json = (body = {}) => {
+    if (Object.prototype.hasOwnProperty.call(body, 'success')) return sendJson(body);
+    const success = res.statusCode < 400;
+    const fallbackCode = success
+      ? 'SUCCESS'
+      : res.statusCode === 401 ? 'WRONG_PASSWORD'
+        : res.statusCode === 403 ? 'FORBIDDEN'
+          : res.statusCode === 404 ? 'ACCOUNT_NOT_FOUND'
+            : res.statusCode === 409 ? 'CONFLICT'
+              : res.statusCode === 422 ? 'VALIDATION_ERROR'
+                : res.statusCode >= 500 ? 'INTERNAL_SERVER_ERROR'
+                  : 'VALIDATION_ERROR';
+    return sendJson({ success, code: body.code || fallbackCode, ...body });
+  };
+  next();
 });
 
 router.post('/register', authLimiter, authController.register);

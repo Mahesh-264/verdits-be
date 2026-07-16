@@ -11,7 +11,7 @@ const createAuthLimiter = ({ windowMs, max, message }) => rateLimit({
   max,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message },
+  message: { success: false, code: 'TOO_MANY_ATTEMPTS', message },
 });
 
 const passthrough = (req, res, next) => next();

@@ -18,6 +18,13 @@ const userSchema = new mongoose.Schema({
   },
   googleId: { type: String, unique: true, sparse: true },
   verified: { type: Boolean, default: true },
+  emailVerified: { type: Boolean, default: true },
+  phoneVerified: { type: Boolean, default: true },
+  accountStatus: {
+    type: String,
+    enum: ['active', 'pending_approval', 'suspended', 'blocked', 'deleted'],
+    default: 'active',
+  },
   profilePicture: { type: String, default: '' },
   profileImage: { type: String, default: "" },
   followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

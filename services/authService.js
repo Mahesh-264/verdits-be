@@ -70,6 +70,8 @@ const createUserFromPending = async (pending) => {
     authProvider: pending.authProvider === 'google' && pending.password ? 'both' : pending.authProvider || 'email',
     googleId: pending.googleId,
     verified: true,
+    emailVerified: true,
+    phoneVerified: true,
     profilePicture: pending.profilePicture,
     profileImage: pending.profilePicture,
     address: pending.address,
