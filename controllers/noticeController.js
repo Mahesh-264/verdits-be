@@ -4,7 +4,7 @@ const getNoticeError = (error) => {
   const status = Number(error?.status || error?.statusCode || error?.code);
   const message = String(error?.message || "");
 
-  if (error?.code === "GEMINI_TIMEOUT" || /timed out/i.test(message)) {
+  if (error?.code === "GROQ_TIMEOUT" || /timed out/i.test(message)) {
     return { status: 504, message: "Notice generation timed out. Please try again." };
   }
   if (status === 429 || /rate limit|resource exhausted/i.test(message)) {

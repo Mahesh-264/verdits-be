@@ -1,14 +1,14 @@
-const { generateGeminiText } = require("./geminiService");
+const { generateGroqText } = require("./groqService");
 const { buildNoticePrompt, buildNoticeEditPrompt } = require("./noticePrompt");
 
 const generateNoticeDraft = ({ documentType, basicInformation, lawyer }) =>
-  generateGeminiText({
+  generateGroqText({
     prompt: buildNoticePrompt({ documentType, basicInformation, lawyer }),
     temperature: 0.15,
   });
 
 const editNoticeDraft = ({ documentType, currentDraft, editInstruction }) =>
-  generateGeminiText({
+  generateGroqText({
     prompt: buildNoticeEditPrompt({ documentType, currentDraft, editInstruction }),
     temperature: 0.1,
   });

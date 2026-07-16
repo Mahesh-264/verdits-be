@@ -1,5 +1,5 @@
 const User = require("../models/User");
-const { generateGeminiText } = require("../services/geminiService");
+const { generateGroqText } = require("../services/groqService");
 
 const VALID_CATEGORIES = [
   "criminal",
@@ -16,7 +16,7 @@ const FALLBACK_REPLY =
 const NON_LEGAL_REPLY =
   "I can only help with legal questions. Please ask about a legal issue such as contracts, property, family matters, criminal law, cyber fraud, employment, or court procedures.";
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 const AI_MAX_RETRIES = 1;
 
 const CATEGORY_ALIASES = {
@@ -213,8 +213,8 @@ const fetchSuggestedLawyers = async (category) => {
   }));
 };
 
-const callGeminiOnce = async (message) => {
-  const rawText = await generateGeminiText({
+const callAIOnce = async (message) => {
+  const rawText = await generateGroqText({
     prompt: buildPrompt(message),
     temperature: 0.1,
     responseMimeType: "application/json",
@@ -233,18 +233,18 @@ const getAICompletion = async (message) => {
   for (let attempt = 0; attempt <= AI_MAX_RETRIES; attempt += 1) {
     try {
       console.log(
-        `[AI] Gemini attempt ${attempt + 1}/${AI_MAX_RETRIES + 1} using model ${GEMINI_MODEL}`
+        `[AI] Groq attempt ${attempt + 1}/${AI_MAX_RETRIES + 1} using model ${GROQ_MODEL}`
       );
 
-      const result = await callGeminiOnce(message);
+      const result = await callAIOnce(message);
 
-      console.log("[AI] Gemini raw response:", result.rawText);
+      console.log("[AI] Groq raw response:", result.rawText);
 
       return result.parsed;
     } catch (error) {
       lastError = error;
       console.error(
-        `[AI] Gemini attempt ${attempt + 1} failed:`,
+        `[AI] Groq attempt ${attempt + 1} failed:`,
         error?.message || error
       );
 
@@ -298,7 +298,7 @@ exports.chatWithAI = async (req, res) => {
         }
       }
     } catch (aiError) {
-      console.error("[AI] Final Gemini failure:", aiError?.message || aiError);
+      console.error("[AI] Final Groq failure:", aiError?.message || aiError);
       category = detectCategoryFromText(incomingMessage);
       console.warn(`[AI] Using fallback keyword category: ${category}`);
     }
