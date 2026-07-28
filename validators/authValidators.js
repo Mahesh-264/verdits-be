@@ -9,9 +9,16 @@ const normalizePhone = (value) => trimString(value);
 const isEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const isPhone = (value) => /^\+?[0-9]{10,15}$/.test(String(value || '').replace(/[\s-]/g, ''));
 const isScalar = (value) => typeof value === 'string' || typeof value === 'number';
+const hasValue = (value) => {
+  if (Array.isArray(value)) {
+    return value.some((item) => isScalar(item) && trimString(item));
+  }
+
+  return isScalar(value) && trimString(value);
+};
 
 const requireFields = (payload, fields) => {
-  const missing = fields.filter((field) => !isScalar(payload[field]) || !trimString(payload[field]));
+  const missing = fields.filter((field) => !hasValue(payload[field]));
   if (missing.length) {
     const error = new Error(`${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} required`);
     error.statusCode = 400;
