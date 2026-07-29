@@ -4,6 +4,7 @@ const PendingRegistration = require('../models/PendingRegistration');
 const VerificationOtp = require('../models/VerificationOtp');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const cloudinary = require('../config/cloudinary');
 const streamifier = require('streamifier');
 const {
@@ -274,6 +275,113 @@ const notifyLawyerFollowers = async ({ lawyer, type, title, message, link, metad
     metadata,
     io,
   })));
+};
+
+const generateTeamCode = async () => {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const code = crypto.randomBytes(4).toString('hex').slice(0, 6).toUpperCase();
+    const existingTeam = await User.exists({ 'lawyerProfile.team.teamCode': code });
+    if (!existingTeam) return code;
+  }
+
+  const error = new Error('Unable to generate a team code. Please try again.');
+  error.statusCode = 500;
+  throw error;
+};
+
+const getLawyerName = (lawyer) => (
+  `${lawyer.firstName || ''} ${lawyer.lastName || ''}`.trim() || lawyer.name || 'Lawyer'
+);
+
+const getTeamResponseUser = (lawyer) => User.findById(lawyer._id).select(sanitizeUser);
+
+const formatTeamCase = (teamCase) => ({
+  id: teamCase._id,
+  clientName: teamCase.clientName || '',
+  caseTitle: teamCase.caseTitle || '',
+  caseDetails: teamCase.caseDetails || '',
+  basicInfo: teamCase.basicInfo || '',
+  courtName: teamCase.courtName || '',
+  hearingDate: teamCase.hearingDate || null,
+  documents: Array.isArray(teamCase.documents) ? teamCase.documents : [],
+  status: teamCase.status || 'new',
+  addedBy: teamCase.addedBy || null,
+  addedByName: teamCase.addedByName || 'Lawyer',
+  createdAt: teamCase.createdAt,
+  updatedAt: teamCase.updatedAt,
+});
+
+const formatTeamWorkspace = (seniorLawyer) => {
+  const team = seniorLawyer?.lawyerProfile?.team || {};
+  const members = Array.isArray(team.members) ? team.members : [];
+  const cases = Array.isArray(team.cases) ? team.cases : [];
+
+  return {
+    role: 'owner',
+    teamCode: team.teamCode || '',
+    firmName: team.firmName || '',
+    seniorLawyerName: team.seniorLawyerName || getLawyerName(seniorLawyer),
+    maxTeamSize: team.maxTeamSize || members.length + 1,
+    seniorLawyer: seniorLawyer._id,
+    members,
+    cases: cases
+      .slice()
+      .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
+      .map(formatTeamCase),
+    createdAt: team.createdAt,
+  };
+};
+
+const findTeamOwnerForLawyer = async (lawyer) => {
+  if (!lawyer || lawyer.role !== 'lawyer') return null;
+
+  if (lawyer.lawyerProfile?.team?.role === 'owner') {
+    return lawyer;
+  }
+
+  const seniorLawyerId = lawyer.lawyerProfile?.team?.seniorLawyer;
+  const teamCode = lawyer.lawyerProfile?.team?.teamCode;
+
+  if (seniorLawyerId) {
+    return User.findOne({
+      _id: seniorLawyerId,
+      role: 'lawyer',
+      'lawyerProfile.team.role': 'owner',
+    });
+  }
+
+  if (teamCode) {
+    return User.findOne({
+      role: 'lawyer',
+      'lawyerProfile.team.role': 'owner',
+      'lawyerProfile.team.teamCode': teamCode,
+    });
+  }
+
+  return null;
+};
+
+const parseTeamDocuments = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((document) => {
+        if (typeof document === 'string') {
+          const url = trimString(document);
+          return url ? { name: url, url } : null;
+        }
+
+        const name = trimString(document?.name);
+        const url = trimString(document?.url);
+        return (name || url) ? { name: name || url, url } : null;
+      })
+      .filter(Boolean);
+  }
+
+  return String(value || '')
+    .split('\n')
+    .map((line) => trimString(line))
+    .filter(Boolean)
+    .map((line) => ({ name: line, url: line }));
 };
 
 const uploadResumeToCloudinary = (file) => (
@@ -1765,7 +1873,313 @@ exports.createLawyerJamSession = async (req, res) => {
   }
 };
 
-// 17A. GET STUDENT DISCOVERY DATA
+// 16. CREATE LAWYER TEAM
+exports.createLawyerTeam = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can create a team' });
+    }
+
+    if (lawyer.lawyerProfile?.team?.teamCode) {
+      return res.status(400).json({ message: 'You are already part of a team' });
+    }
+
+    const firmName = trimString(req.body.firmName);
+    const seniorLawyerName = trimString(req.body.seniorLawyerName);
+    const maxTeamSize = Number(req.body.maxTeamSize);
+
+    if (!firmName || !seniorLawyerName) {
+      return res.status(400).json({ message: 'Firm name and senior lawyer name are required' });
+    }
+
+    if (!Number.isInteger(maxTeamSize) || maxTeamSize < 2) {
+      return res.status(400).json({ message: 'Team size must be at least 2' });
+    }
+
+    const currentProfile = lawyer.lawyerProfile?.toObject
+      ? lawyer.lawyerProfile.toObject()
+      : (lawyer.lawyerProfile || {});
+    const teamCode = await generateTeamCode();
+
+    lawyer.set('lawyerProfile', {
+      ...currentProfile,
+      team: {
+        role: 'owner',
+        teamCode,
+        firmName,
+        seniorLawyerName,
+        maxTeamSize,
+        seniorLawyer: lawyer._id,
+        members: [],
+        createdAt: new Date(),
+      },
+    });
+
+    await lawyer.save();
+
+    res.status(201).json({
+      message: 'Team created',
+      team: lawyer.lawyerProfile.team,
+      user: await getTeamResponseUser(lawyer),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+// 17. JOIN LAWYER TEAM
+exports.joinLawyerTeam = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can join a team' });
+    }
+
+    if (lawyer.lawyerProfile?.team?.teamCode) {
+      return res.status(400).json({ message: 'You are already part of a team' });
+    }
+
+    const teamCode = trimString(req.body.teamCode).toUpperCase();
+    if (!teamCode) {
+      return res.status(400).json({ message: 'Team code is required' });
+    }
+
+    const seniorLawyer = await User.findOne({
+      role: 'lawyer',
+      'lawyerProfile.team.role': 'owner',
+      'lawyerProfile.team.teamCode': teamCode,
+    });
+
+    if (!seniorLawyer) {
+      return res.status(404).json({ message: 'Team not found. Please check the code.' });
+    }
+
+    if (String(seniorLawyer._id) === String(lawyer._id)) {
+      return res.status(400).json({ message: 'You cannot join your own team' });
+    }
+
+    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
+      ? seniorLawyer.lawyerProfile.toObject()
+      : (seniorLawyer.lawyerProfile || {});
+    const seniorTeam = seniorProfile.team || {};
+    const members = Array.isArray(seniorTeam.members) ? seniorTeam.members : [];
+    const maxTeamSize = Number(seniorTeam.maxTeamSize) || 2;
+    const alreadyMember = members.some((member) => String(member.lawyerId) === String(lawyer._id));
+
+    if (alreadyMember) {
+      return res.status(400).json({ message: 'You have already joined this team' });
+    }
+
+    if (members.length + 1 >= maxTeamSize) {
+      return res.status(400).json({ message: 'This team is already full' });
+    }
+
+    const member = {
+      lawyerId: lawyer._id,
+      name: getLawyerName(lawyer),
+      email: lawyer.email || '',
+      phone: lawyer.phone || '',
+      joinedAt: new Date(),
+    };
+
+    seniorLawyer.set('lawyerProfile', {
+      ...seniorProfile,
+      team: {
+        ...seniorTeam,
+        members: [...members, member],
+      },
+    });
+
+    const currentProfile = lawyer.lawyerProfile?.toObject
+      ? lawyer.lawyerProfile.toObject()
+      : (lawyer.lawyerProfile || {});
+
+    lawyer.set('lawyerProfile', {
+      ...currentProfile,
+      team: {
+        role: 'member',
+        teamCode,
+        firmName: seniorTeam.firmName,
+        seniorLawyerName: seniorTeam.seniorLawyerName,
+        maxTeamSize,
+        seniorLawyer: seniorLawyer._id,
+        members: [],
+        joinedAt: new Date(),
+      },
+    });
+
+    await seniorLawyer.save();
+    await lawyer.save();
+
+    res.json({
+      message: 'Team joined',
+      team: lawyer.lawyerProfile.team,
+      user: await getTeamResponseUser(lawyer),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+// 17A. GET LAWYER TEAM WORKSPACE
+exports.getLawyerTeamWorkspace = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can access a team workspace' });
+    }
+
+    if (!lawyer.lawyerProfile?.team?.teamCode) {
+      return res.status(404).json({ message: 'Create or join a team first' });
+    }
+
+    const seniorLawyer = await findTeamOwnerForLawyer(lawyer);
+    if (!seniorLawyer) {
+      return res.status(404).json({ message: 'Team not found' });
+    }
+
+    res.json({
+      team: {
+        ...formatTeamWorkspace(seniorLawyer),
+        role: lawyer.lawyerProfile.team.role || 'member',
+        joinedAt: lawyer.lawyerProfile.team.joinedAt,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17B. ADD TEAM CASE
+exports.addLawyerTeamCase = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can add team cases' });
+    }
+
+    if (!lawyer.lawyerProfile?.team?.teamCode) {
+      return res.status(404).json({ message: 'Create or join a team first' });
+    }
+
+    const seniorLawyer = await findTeamOwnerForLawyer(lawyer);
+    if (!seniorLawyer) {
+      return res.status(404).json({ message: 'Team not found' });
+    }
+
+    const clientName = trimString(req.body.clientName);
+    const caseTitle = trimString(req.body.caseTitle);
+    const caseDetails = trimString(req.body.caseDetails);
+    const basicInfo = trimString(req.body.basicInfo);
+    const courtName = trimString(req.body.courtName);
+    const status = trimString(req.body.status) || 'new';
+    const allowedStatuses = ['new', 'in_progress', 'hearing_scheduled', 'closed'];
+
+    if (!clientName || !caseTitle || !caseDetails) {
+      return res.status(400).json({ message: 'Client name, case title, and case details are required' });
+    }
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ message: 'Invalid case status' });
+    }
+
+    const hearingDate = req.body.hearingDate ? new Date(req.body.hearingDate) : null;
+    if (hearingDate && Number.isNaN(hearingDate.getTime())) {
+      return res.status(400).json({ message: 'Invalid hearing date' });
+    }
+
+    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
+      ? seniorLawyer.lawyerProfile.toObject()
+      : (seniorLawyer.lawyerProfile || {});
+    const seniorTeam = seniorProfile.team || {};
+    const existingCases = Array.isArray(seniorTeam.cases) ? seniorTeam.cases : [];
+
+    const teamCase = {
+      clientName,
+      caseTitle,
+      caseDetails,
+      basicInfo,
+      courtName,
+      hearingDate,
+      documents: parseTeamDocuments(req.body.documents),
+      status,
+      addedBy: lawyer._id,
+      addedByName: getLawyerName(lawyer),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    seniorLawyer.set('lawyerProfile', {
+      ...seniorProfile,
+      team: {
+        ...seniorTeam,
+        cases: [teamCase, ...existingCases],
+      },
+    });
+
+    await seniorLawyer.save();
+
+    const savedCase = seniorLawyer.lawyerProfile.team.cases[0];
+    res.status(201).json({
+      message: 'Team case added',
+      case: formatTeamCase(savedCase),
+      team: formatTeamWorkspace(seniorLawyer),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17C. UPDATE TEAM CASE STATUS
+exports.updateLawyerTeamCaseStatus = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can update team cases' });
+    }
+
+    if (!lawyer.lawyerProfile?.team?.teamCode) {
+      return res.status(404).json({ message: 'Create or join a team first' });
+    }
+
+    const status = trimString(req.body.status);
+    const allowedStatuses = ['new', 'in_progress', 'hearing_scheduled', 'closed'];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ message: 'Invalid case status' });
+    }
+
+    const seniorLawyer = await findTeamOwnerForLawyer(lawyer);
+    if (!seniorLawyer) {
+      return res.status(404).json({ message: 'Team not found' });
+    }
+
+    const teamCase = seniorLawyer.lawyerProfile?.team?.cases?.id(req.params.caseId);
+    if (!teamCase) {
+      return res.status(404).json({ message: 'Team case not found' });
+    }
+
+    teamCase.status = status;
+    teamCase.updatedAt = new Date();
+    await seniorLawyer.save();
+
+    res.json({
+      message: 'Case status updated',
+      case: formatTeamCase(teamCase),
+      team: formatTeamWorkspace(seniorLawyer),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 17D. GET STUDENT DISCOVERY DATA
 exports.getStudentDiscovery = async (req, res) => {
   try {
     const student = await User.findById(req.user._id).select(sanitizeUser);
