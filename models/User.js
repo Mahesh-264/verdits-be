@@ -7,6 +7,8 @@ const isValidLongitude = (value) => Number.isFinite(value) && value >= -180 && v
 const userSchema = new mongoose.Schema({
   firstName: { type: String, required: true },
   lastName: { type: String, required: true },
+  age: { type: Number, min: 0, max: 150 },
+  gender: { type: String, trim: true },
   email: { type: String, unique: true, sparse: true },
   phone: { type: String, unique: true, required: true },
   password: { type: String, required: false, select: false }, // optional for pure OTP users

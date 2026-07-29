@@ -12,26 +12,34 @@ const createNotification = async ({
 }) => {
   if (!recipient || !title || !message) return null;
 
-  const notification = await Notification.create({
-    recipient,
-    actor,
-    type,
-    title,
-    message,
-    link,
-    metadata,
-  });
+  // Notifications are a secondary side effect. A temporary notification or
+  // socket failure must never make an appointment, message, or other primary
+  // action look unsuccessful after it has already been saved.
+  try {
+    const notification = await Notification.create({
+      recipient,
+      actor,
+      type,
+      title,
+      message,
+      link,
+      metadata,
+    });
 
-  const populated = await notification.populate(
-    'actor',
-    'firstName lastName profileImage role lawyerProfile.specialization'
-  );
+    const populated = await notification.populate(
+      'actor',
+      'firstName lastName profileImage role lawyerProfile.specialization'
+    );
 
-  if (io) {
-    io.to(String(recipient)).emit('notification:new', populated);
+    if (io) {
+      io.to(String(recipient)).emit('notification:new', populated);
+    }
+
+    return populated;
+  } catch (error) {
+    console.error(`Failed to create ${type} notification for ${recipient}:`, error.message);
+    return null;
   }
-
-  return populated;
 };
 
 const getDisplayName = (user, fallback = 'Someone') => {
