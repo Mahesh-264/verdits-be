@@ -34,9 +34,12 @@ router.post('/', async (req, res) => {
   const { userId, lawyerId } = req.body;
   const requesterId = req.user?._id;
 
-  if (String(requesterId) !== String(userId)) {
+  if (req.user.role !== 'user' || String(requesterId) !== String(userId)) {
     return res.status(403).json({ message: 'You can only create appointments for your own account' });
   }
+
+  const lawyer = await User.findOne({ _id: lawyerId, role: 'lawyer' }).select('_id');
+  if (!lawyer) return res.status(404).json({ message: 'Lawyer not found' });
 
   const existingAppointment = await Appointment.findOne({
     userId,
@@ -134,6 +137,26 @@ router.put('/:id', async (req, res) => {
     metadata: { appointmentId: updated._id, status, lawyerId: updated.lawyerId?._id || updated.lawyerId },
     io: req.app.get('socketio'),
   });
+
+  res.json(updated);
+});
+
+// Clients may only cancel their own pending request. Keeping the record makes
+// history and notification state auditable while preventing status tampering.
+router.patch('/:id/cancel', async (req, res) => {
+  if (req.user.role !== 'user') {
+    return res.status(403).json({ message: 'Only users can cancel appointment requests' });
+  }
+
+  const updated = await Appointment.findOneAndUpdate(
+    { _id: req.params.id, userId: req.user._id, status: 'pending' },
+    { status: 'cancelled' },
+    { new: true }
+  ).populate(populateAppointment);
+
+  if (!updated) {
+    return res.status(404).json({ message: 'Pending appointment not found' });
+  }
 
   res.json(updated);
 });
