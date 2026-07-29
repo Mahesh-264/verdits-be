@@ -17,12 +17,21 @@ const { createNotification, getDisplayName } = require('./services/notificationS
 
 const app = express();
 const server = http.createServer(app); 
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,https://bluxurywebsite.onrender.com')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+const corsOptions = {
+    origin(origin, callback) {
+        // Non-browser clients do not send Origin; browser origins must be explicit.
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(new Error('Origin is not allowed by CORS'));
+    },
+    credentials: true,
+};
 
 const io = new Server(server, {
-    cors: {
-        origin: (origin, callback) => callback(null, true),
-        credentials: true
-    }
+    cors: corsOptions
 });
 
 io.use((socket, next) => {
@@ -161,7 +170,7 @@ app.set("socketio", io);
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
-app.use(cors({ origin: (o, cb) => cb(null, true), credentials: true }));
+app.use(cors(corsOptions));
 
 app.use((req, res, next) => {
     console.log(`--- [${new Date().toLocaleTimeString()}] ${req.method} ${req.url} ---`);
