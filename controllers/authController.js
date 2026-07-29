@@ -1312,8 +1312,12 @@ exports.getLawyers = async (req, res) => {
     
     const lawyers = await User.find(query)
       .select(sanitizeUser)
-      .sort({ createdAt: -1 });
-    res.json(lawyers);
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // The auth router adds metadata by spreading response objects. Returning
+    // the list under a named field preserves it as an array for chat clients.
+    res.json({ lawyers });
   } catch (error) { 
     res.status(500).json({ message: error.message }); 
   }
@@ -1357,9 +1361,10 @@ exports.getStudents = async (req, res) => {
 
     const students = await User.find(query)
       .select(sanitizeUser)
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json(students);
+    res.json({ students });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1368,11 +1373,11 @@ exports.getStudents = async (req, res) => {
 // 7A. GET CURRENT USER
 exports.getCurrentUser = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select(sanitizeUser);
+    const user = await User.findById(req.user._id).select(sanitizeUser).lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
-    res.json(user);
+    res.json({ ...user, name: getDisplayName(user) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1612,11 +1617,14 @@ exports.acceptStudentConnectionRequest = async (req, res) => {
 // 11. GET LAWYER BY ID (Profile View)
 exports.getLawyerById = async (req, res) => {
   try {
-    const lawyer = await User.findById(req.params.id).select(sanitizeUser);
-    if (!lawyer || lawyer.role !== 'lawyer') {
+    // Return a plain object. The auth route adds response metadata by
+    // spreading its body; spreading a Mongoose document hides its actual
+    // fields inside `_doc`, including `_id` needed for appointments.
+    const lawyer = await User.findById(req.params.id).select(sanitizeUser).lean();
+    if (!lawyer || !['lawyer', 'LAWYER'].includes(lawyer.role)) {
       return res.status(404).json({ message: "Lawyer not found" });
     }
-    res.json(lawyer);
+    res.json({ ...lawyer, name: getDisplayName(lawyer) });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -1697,7 +1705,7 @@ exports.updateProfile = async (req, res) => {
 
     await user.save();
     console.log(`🔄 Profile updated for: ${user.phone}`);
-    res.json({ message: "Updated", user });
+    res.json({ message: "Updated", user: user.toObject() });
   } catch (error) {
       res.status(error.statusCode || 500).json({ message: error.message });
   }
