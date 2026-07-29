@@ -70,6 +70,50 @@ const userSchema = new mongoose.Schema({
     rating: { type: Number, default: 4.8 },
     isVerified: { type: Boolean, default: false },
     isOnline: { type: Boolean, default: true },
+    team: {
+      role: { type: String, enum: ['owner', 'member'] },
+      teamCode: { type: String, uppercase: true, trim: true },
+      firmName: String,
+      seniorLawyerName: String,
+      maxTeamSize: { type: Number, min: 2 },
+      seniorLawyer: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      members: [
+        {
+          lawyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+          name: String,
+          email: String,
+          phone: String,
+          joinedAt: { type: Date, default: Date.now },
+        }
+      ],
+      cases: [
+        {
+          clientName: String,
+          caseTitle: String,
+          caseDetails: String,
+          basicInfo: String,
+          courtName: String,
+          hearingDate: Date,
+          documents: [
+            {
+              name: String,
+              url: String,
+            }
+          ],
+          status: {
+            type: String,
+            enum: ['new', 'in_progress', 'hearing_scheduled', 'closed'],
+            default: 'new',
+          },
+          addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+          addedByName: String,
+          createdAt: { type: Date, default: Date.now },
+          updatedAt: { type: Date, default: Date.now },
+        }
+      ],
+      createdAt: { type: Date, default: Date.now },
+      joinedAt: Date,
+    },
     internships: [
       {
         title: String,

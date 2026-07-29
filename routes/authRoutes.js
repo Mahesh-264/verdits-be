@@ -85,6 +85,11 @@ router.post('/jam-sessions/:sessionId/comments', authorize('student', 'lawyer'),
 router.get('/lawyer/student-interactions', authorize('lawyer'), authController.getLawyerStudentInteractions);
 router.post('/lawyer/internships', authorize('lawyer'), authController.createLawyerInternship);
 router.post('/lawyer/jam-sessions', authorize('lawyer'), authController.createLawyerJamSession);
+router.get('/lawyer/team', authorize('lawyer'), authController.getLawyerTeamWorkspace);
+router.post('/lawyer/team', authorize('lawyer'), authController.createLawyerTeam);
+router.post('/lawyer/team/join', authorize('lawyer'), authController.joinLawyerTeam);
+router.post('/lawyer/team/cases', authorize('lawyer'), authController.addLawyerTeamCase);
+router.patch('/lawyer/team/cases/:caseId/status', authorize('lawyer'), authController.updateLawyerTeamCaseStatus);
 router.post('/lawyer/internships/:postId/like', authorize('student', 'lawyer'), authController.toggleInternshipLike);
 router.post('/lawyer/internships/:postId/comments', authorize('student', 'lawyer'), authController.addInternshipComment);
 router.patch('/lawyer/internships/:postId/toggle-status', authorize('lawyer'), authController.toggleInternshipStatus);
