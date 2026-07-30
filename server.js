@@ -17,7 +17,7 @@ const { createNotification, getDisplayName } = require('./services/notificationS
 
 const app = express();
 const server = http.createServer(app); 
-const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,https://bluxurywebsite.onrender.com')
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://bluxurywebsite.onrender.com')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -52,7 +52,7 @@ io.on("connection", (socket) => {
     console.log(`🔗 Connected: ${socket.userId}`);
     socket.join(socket.userId); 
 
-    socket.on("sendMessage", async ({ receiverId, content }) => {
+    socket.on("sendMessage", async ({ receiverId, content, messageType = 'text' }) => {
         try {
             const Message = require("./models/Message"); 
 
@@ -60,6 +60,7 @@ io.on("connection", (socket) => {
                 sender: socket.userId,
                 receiver: receiverId,
                 senderRole: socket.userRole,
+                messageType,
                 content: content,
                 timestamp: new Date()
             });

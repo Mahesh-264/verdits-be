@@ -41,10 +41,10 @@ exports.sendMessage = async (req, res) => {
 
     const message = await Message.create(newMessageData);
     
-    const populated = await message.populate(
-      "sender",
-      "firstName lastName phone profileImage role lawyerProfile.specialization"
-    );
+    const populated = await message.populate([
+      { path: "sender", select: "firstName lastName phone profileImage role lawyerProfile.specialization" },
+      { path: "receiver", select: "firstName lastName phone profileImage role lawyerProfile.specialization" },
+    ]);
 
     const io = req.app.get("socketio");
     if (io) {
