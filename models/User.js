@@ -88,6 +88,15 @@ const userSchema = new mongoose.Schema({
           joinedAt: { type: Date, default: Date.now },
         }
       ],
+      pendingRequests: [
+        {
+          lawyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+          name: String,
+          email: String,
+          phone: String,
+          requestedAt: { type: Date, default: Date.now },
+        }
+      ],
       cases: [
         {
           clientName: String,
