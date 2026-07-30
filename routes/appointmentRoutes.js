@@ -94,6 +94,29 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Get the current user's accepted lawyer connections.
+// This route must come before `/:lawyerId` so "user/mine" is not treated as
+// a lawyer id.
+router.get('/user/mine', async (req, res) => {
+  if (req.user.role !== 'user') {
+    return res.status(403).json({ message: 'Only users can view their lawyer connections' });
+  }
+
+  try {
+    const data = await Appointment.find({
+      userId: req.user._id,
+      status: 'accepted',
+    })
+      .populate(populateAppointment)
+      .sort({ updatedAt: -1 });
+
+    res.json(data);
+  } catch (error) {
+    console.error('Error loading user lawyer connections:', error);
+    res.status(500).json({ message: 'Unable to load your connected lawyers' });
+  }
+});
+
 // Get lawyer appointments
 router.get('/:lawyerId', async (req, res) => {
   const isLawyerOwner = req.user.role === 'lawyer' && String(req.user._id) === String(req.params.lawyerId);
