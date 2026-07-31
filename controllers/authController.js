@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const Team = require('../models/Team');
 const Otp = require('../models/Otp');
 const PendingRegistration = require('../models/PendingRegistration');
 const VerificationOtp = require('../models/VerificationOtp');
@@ -280,8 +281,9 @@ const notifyLawyerFollowers = async ({ lawyer, type, title, message, link, metad
 const generateTeamCode = async () => {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const code = crypto.randomBytes(4).toString('hex').slice(0, 6).toUpperCase();
-    const existingTeam = await User.exists({ 'lawyerProfile.team.teamCode': code });
-    if (!existingTeam) return code;
+    const existingTeam = await Team.exists({ teamCode: code });
+    const existingLegacyTeam = await User.exists({ 'lawyerProfile.team.teamCode': code });
+    if (!existingTeam && !existingLegacyTeam) return code;
   }
 
   const error = new Error('Unable to generate a team code. Please try again.');
@@ -320,59 +322,161 @@ const formatTeamRequest = (request) => ({
   requestedAt: request.requestedAt,
 });
 
-const formatTeamWorkspace = (seniorLawyer) => {
-  const team = seniorLawyer?.lawyerProfile?.team || {};
-  const members = Array.isArray(team.members) ? team.members : [];
-  const cases = Array.isArray(team.cases) ? team.cases : [];
-  const pendingRequests = Array.isArray(team.pendingRequests) ? team.pendingRequests : [];
+const formatTeamMember = (member) => ({
+  id: member._id,
+  lawyerId: member.lawyerId,
+  name: member.name || 'Lawyer',
+  email: member.email || '',
+  phone: member.phone || '',
+  joinedAt: member.joinedAt,
+});
+
+const formatTeamWorkspace = (team, viewerId) => {
+  const members = Array.isArray(team?.members) ? team.members : [];
+  const cases = Array.isArray(team?.cases) ? team.cases : [];
+  const pendingRequests = Array.isArray(team?.pendingRequests) ? team.pendingRequests : [];
+  const isOwner = String(team?.owner) === String(viewerId);
+  const visibleCases = isOwner
+    ? cases
+    : cases.filter((teamCase) => String(teamCase.addedBy) === String(viewerId));
 
   return {
-    role: 'owner',
+    id: team._id,
+    role: isOwner ? 'owner' : 'member',
     teamCode: team.teamCode || '',
     firmName: team.firmName || '',
-    seniorLawyerName: team.seniorLawyerName || getLawyerName(seniorLawyer),
+    seniorLawyerName: team.seniorLawyerName || 'Senior Lawyer',
     maxTeamSize: team.maxTeamSize || members.length + 1,
-    seniorLawyer: seniorLawyer._id,
-    members,
-    pendingRequests: pendingRequests
+    seniorLawyer: team.owner,
+    members: members.map(formatTeamMember),
+    pendingRequests: isOwner ? pendingRequests
       .slice()
       .sort((first, second) => new Date(second.requestedAt || 0) - new Date(first.requestedAt || 0))
-      .map(formatTeamRequest),
-    cases: cases
+      .map(formatTeamRequest) : [],
+    cases: visibleCases
       .slice()
       .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
       .map(formatTeamCase),
     createdAt: team.createdAt,
+    updatedAt: team.updatedAt,
   };
 };
 
-const findTeamOwnerForLawyer = async (lawyer) => {
-  if (!lawyer || lawyer.role !== 'lawyer') return null;
-
-  if (lawyer.lawyerProfile?.team?.role === 'owner') {
-    return lawyer;
+const migrateLegacyTeamIfNeeded = async (legacyOwner) => {
+  const legacyTeam = legacyOwner?.lawyerProfile?.team;
+  if (!legacyOwner || legacyOwner.role !== 'lawyer' || legacyTeam?.role !== 'owner' || !legacyTeam.teamCode) {
+    return null;
   }
 
-  const seniorLawyerId = lawyer.lawyerProfile?.team?.seniorLawyer;
-  const teamCode = lawyer.lawyerProfile?.team?.teamCode;
+  const existingTeam = await Team.findOne({ teamCode: legacyTeam.teamCode });
+  if (existingTeam) return existingTeam;
 
-  if (seniorLawyerId) {
-    return User.findOne({
-      _id: seniorLawyerId,
+  return Team.create({
+    teamCode: legacyTeam.teamCode,
+    firmName: legacyTeam.firmName || 'Lawyer Team',
+    seniorLawyerName: legacyTeam.seniorLawyerName || getLawyerName(legacyOwner),
+    maxTeamSize: Number(legacyTeam.maxTeamSize) || 2,
+    owner: legacyOwner._id,
+    members: Array.isArray(legacyTeam.members) ? legacyTeam.members : [],
+    pendingRequests: Array.isArray(legacyTeam.pendingRequests) ? legacyTeam.pendingRequests : [],
+    cases: Array.isArray(legacyTeam.cases) ? legacyTeam.cases : [],
+    createdAt: legacyTeam.createdAt || new Date(),
+  });
+};
+
+const findTeamByCode = async (teamCode) => {
+  const team = await Team.findOne({ teamCode });
+  if (team) return team;
+
+  const legacyOwner = await User.findOne({
+    role: 'lawyer',
+    'lawyerProfile.team.role': 'owner',
+    'lawyerProfile.team.teamCode': teamCode,
+  });
+
+  return migrateLegacyTeamIfNeeded(legacyOwner);
+};
+
+const getLawyerTeamDocuments = async (lawyerId) => {
+  const lawyer = await User.findById(lawyerId);
+  if (lawyer?.lawyerProfile?.team?.role === 'owner') {
+    await migrateLegacyTeamIfNeeded(lawyer);
+  } else if (lawyer?.lawyerProfile?.team?.teamCode) {
+    const legacyOwner = await User.findOne({
       role: 'lawyer',
       'lawyerProfile.team.role': 'owner',
+      'lawyerProfile.team.teamCode': lawyer.lawyerProfile.team.teamCode,
     });
+    await migrateLegacyTeamIfNeeded(legacyOwner);
   }
 
-  if (teamCode) {
-    return User.findOne({
-      role: 'lawyer',
-      'lawyerProfile.team.role': 'owner',
-      'lawyerProfile.team.teamCode': teamCode,
-    });
+  return Team.find({
+    $or: [
+      { owner: lawyerId },
+      { 'members.lawyerId': lawyerId },
+    ],
+  }).sort({ updatedAt: -1, createdAt: -1 });
+};
+
+const getTeamForOwnerAction = async (lawyerId, teamId) => {
+  const query = { owner: lawyerId };
+  if (teamId) query._id = teamId;
+  const team = await Team.findOne(query);
+  if (!team) {
+    const error = new Error('Only the senior lawyer who created this team can perform this action');
+    error.statusCode = 403;
+    throw error;
+  }
+  return team;
+};
+
+const getOwnedTeamForRequest = async (lawyerId, requestId, teamId) => {
+  if (teamId) {
+    try {
+      const selectedTeam = await getTeamForOwnerAction(lawyerId, teamId);
+      const hasRequest = selectedTeam.pendingRequests.some((request) => String(request._id) === String(requestId));
+      if (hasRequest) return selectedTeam;
+    } catch (error) {
+      if (error.statusCode !== 403 && error.statusCode !== 404) {
+        throw error;
+      }
+    }
   }
 
-  return null;
+  const team = await Team.findOne({
+    owner: lawyerId,
+    'pendingRequests._id': requestId,
+  });
+
+  if (!team) {
+    const error = new Error('Join request not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  return team;
+};
+
+const getTeamForMemberAction = async (lawyerId, teamId) => {
+  const query = teamId
+    ? { _id: teamId }
+    : { $or: [{ owner: lawyerId }, { 'members.lawyerId': lawyerId }] };
+  const team = await Team.findOne(query);
+  if (!team) {
+    const error = new Error('Team not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const isOwner = String(team.owner) === String(lawyerId);
+  const isMember = team.members.some((member) => String(member.lawyerId) === String(lawyerId));
+  if (!isOwner && !isMember) {
+    const error = new Error('You are not part of this team');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  return team;
 };
 
 const parseTeamDocuments = (value) => {
@@ -1896,10 +2000,6 @@ exports.createLawyerTeam = async (req, res) => {
       return res.status(403).json({ message: 'Only lawyers can create a team' });
     }
 
-    if (lawyer.lawyerProfile?.team?.teamCode) {
-      return res.status(400).json({ message: 'You are already part of a team' });
-    }
-
     const firmName = trimString(req.body.firmName);
     const seniorLawyerName = trimString(req.body.seniorLawyerName);
     const maxTeamSize = Number(req.body.maxTeamSize);
@@ -1912,32 +2012,24 @@ exports.createLawyerTeam = async (req, res) => {
       return res.status(400).json({ message: 'Team size must be at least 2' });
     }
 
-    const currentProfile = lawyer.lawyerProfile?.toObject
-      ? lawyer.lawyerProfile.toObject()
-      : (lawyer.lawyerProfile || {});
     const teamCode = await generateTeamCode();
-
-    lawyer.set('lawyerProfile', {
-      ...currentProfile,
-      team: {
-        role: 'owner',
-        teamCode,
-        firmName,
-        seniorLawyerName,
-        maxTeamSize,
-        seniorLawyer: lawyer._id,
-        members: [],
-        pendingRequests: [],
-        cases: [],
-        createdAt: new Date(),
-      },
+    const team = await Team.create({
+      teamCode,
+      firmName,
+      seniorLawyerName,
+      maxTeamSize,
+      owner: lawyer._id,
+      members: [],
+      pendingRequests: [],
+      cases: [],
     });
 
-    await lawyer.save();
+    const teams = await getLawyerTeamDocuments(lawyer._id);
 
     res.status(201).json({
       message: 'Team created',
-      team: lawyer.lawyerProfile.team,
+      team: formatTeamWorkspace(team, lawyer._id),
+      teams: teams.map((item) => formatTeamWorkspace(item, lawyer._id)),
       user: await getTeamResponseUser(lawyer),
     });
   } catch (error) {
@@ -1954,36 +2046,24 @@ exports.joinLawyerTeam = async (req, res) => {
       return res.status(403).json({ message: 'Only lawyers can join a team' });
     }
 
-    if (lawyer.lawyerProfile?.team?.teamCode) {
-      return res.status(400).json({ message: 'You are already part of a team' });
-    }
-
     const teamCode = trimString(req.body.teamCode).toUpperCase();
     if (!teamCode) {
       return res.status(400).json({ message: 'Team code is required' });
     }
 
-    const seniorLawyer = await User.findOne({
-      role: 'lawyer',
-      'lawyerProfile.team.role': 'owner',
-      'lawyerProfile.team.teamCode': teamCode,
-    });
+    const team = await findTeamByCode(teamCode);
 
-    if (!seniorLawyer) {
+    if (!team) {
       return res.status(404).json({ message: 'Team not found. Please check the code.' });
     }
 
-    if (String(seniorLawyer._id) === String(lawyer._id)) {
+    if (String(team.owner) === String(lawyer._id)) {
       return res.status(400).json({ message: 'You cannot join your own team' });
     }
 
-    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
-      ? seniorLawyer.lawyerProfile.toObject()
-      : (seniorLawyer.lawyerProfile || {});
-    const seniorTeam = seniorProfile.team || {};
-    const members = Array.isArray(seniorTeam.members) ? seniorTeam.members : [];
-    const pendingRequests = Array.isArray(seniorTeam.pendingRequests) ? seniorTeam.pendingRequests : [];
-    const maxTeamSize = Number(seniorTeam.maxTeamSize) || 2;
+    const members = Array.isArray(team.members) ? team.members : [];
+    const pendingRequests = Array.isArray(team.pendingRequests) ? team.pendingRequests : [];
+    const maxTeamSize = Number(team.maxTeamSize) || 2;
     const lawyerId = String(lawyer._id);
     const alreadyMember = members.some((member) => String(member.lawyerId) === lawyerId);
     const alreadyRequested = pendingRequests.some((request) => String(request.lawyerId) === lawyerId);
@@ -2011,24 +2091,17 @@ exports.joinLawyerTeam = async (req, res) => {
       requestedAt: new Date(),
     };
 
-    seniorLawyer.set('lawyerProfile', {
-      ...seniorProfile,
-      team: {
-        ...seniorTeam,
-        pendingRequests: [pendingRequest, ...pendingRequests],
-      },
-    });
-
-    await seniorLawyer.save();
+    team.pendingRequests.unshift(pendingRequest);
+    await team.save();
 
     await createNotification({
-      recipient: seniorLawyer._id,
+      recipient: team.owner,
       actor: lawyer._id,
       type: 'team_join_request',
       title: 'New team join request',
-      message: `${getLawyerName(lawyer)} requested to join ${seniorTeam.firmName || 'your team'}.`,
-      link: '/lawyer-dash?section=team',
-      metadata: { teamCode, requesterId: lawyer._id },
+      message: `${getLawyerName(lawyer)} requested to join ${team.firmName || 'your team'}.`,
+      link: `/lawyer-dash?section=team&teamId=${team._id}`,
+      metadata: { teamId: team._id, teamCode, requesterId: lawyer._id },
       io: req.app.get('socketio'),
     });
 
@@ -2046,17 +2119,14 @@ exports.acceptLawyerTeamRequest = async (req, res) => {
   try {
     const seniorLawyer = await User.findById(req.user._id);
 
-    if (!seniorLawyer || seniorLawyer.role !== 'lawyer' || seniorLawyer.lawyerProfile?.team?.role !== 'owner') {
+    if (!seniorLawyer || seniorLawyer.role !== 'lawyer') {
       return res.status(403).json({ message: 'Only the senior lawyer can accept team requests' });
     }
 
-    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
-      ? seniorLawyer.lawyerProfile.toObject()
-      : (seniorLawyer.lawyerProfile || {});
-    const seniorTeam = seniorProfile.team || {};
-    const pendingRequests = Array.isArray(seniorTeam.pendingRequests) ? seniorTeam.pendingRequests : [];
-    const members = Array.isArray(seniorTeam.members) ? seniorTeam.members : [];
-    const maxTeamSize = Number(seniorTeam.maxTeamSize) || 2;
+    const team = await getOwnedTeamForRequest(seniorLawyer._id, req.params.requestId, req.query.teamId);
+    const pendingRequests = Array.isArray(team.pendingRequests) ? team.pendingRequests : [];
+    const members = Array.isArray(team.members) ? team.members : [];
+    const maxTeamSize = Number(team.maxTeamSize) || 2;
     const request = pendingRequests.find((item) => String(item._id) === String(req.params.requestId));
 
     if (!request) {
@@ -2072,10 +2142,6 @@ exports.acceptLawyerTeamRequest = async (req, res) => {
       return res.status(404).json({ message: 'Requesting lawyer not found' });
     }
 
-    if (juniorLawyer.lawyerProfile?.team?.teamCode) {
-      return res.status(400).json({ message: 'This lawyer is already part of another team' });
-    }
-
     const requestLawyerId = String(request.lawyerId);
     const alreadyMember = members.some((member) => String(member.lawyerId) === requestLawyerId);
     const member = {
@@ -2086,53 +2152,29 @@ exports.acceptLawyerTeamRequest = async (req, res) => {
       joinedAt: new Date(),
     };
 
-    seniorLawyer.set('lawyerProfile', {
-      ...seniorProfile,
-      team: {
-        ...seniorTeam,
-        members: alreadyMember ? members : [...members, member],
-        pendingRequests: pendingRequests.filter((item) => String(item._id) !== String(req.params.requestId)),
-      },
-    });
-
-    const juniorProfile = juniorLawyer.lawyerProfile?.toObject
-      ? juniorLawyer.lawyerProfile.toObject()
-      : (juniorLawyer.lawyerProfile || {});
-
-    juniorLawyer.set('lawyerProfile', {
-      ...juniorProfile,
-      team: {
-        role: 'member',
-        teamCode: seniorTeam.teamCode,
-        firmName: seniorTeam.firmName,
-        seniorLawyerName: seniorTeam.seniorLawyerName,
-        maxTeamSize,
-        seniorLawyer: seniorLawyer._id,
-        members: [],
-        joinedAt: new Date(),
-      },
-    });
-
-    await seniorLawyer.save();
-    await juniorLawyer.save();
+    if (!alreadyMember) {
+      team.members.push(member);
+    }
+    team.pendingRequests = pendingRequests.filter((item) => String(item._id) !== String(req.params.requestId));
+    await team.save();
 
     await createNotification({
       recipient: juniorLawyer._id,
       actor: seniorLawyer._id,
       type: 'team_join_accepted',
       title: 'Team request accepted',
-      message: `${getLawyerName(seniorLawyer)} accepted your request to join ${seniorTeam.firmName || 'the team'}.`,
-      link: '/lawyer-dash?section=team',
-      metadata: { teamCode: seniorTeam.teamCode, seniorLawyerId: seniorLawyer._id },
+      message: `${getLawyerName(seniorLawyer)} accepted your request to join ${team.firmName || 'the team'}.`,
+      link: `/lawyer-dash?section=team&teamId=${team._id}`,
+      metadata: { teamId: team._id, teamCode: team.teamCode, seniorLawyerId: seniorLawyer._id },
       io: req.app.get('socketio'),
     });
 
     res.json({
       message: 'Join request accepted',
-      team: formatTeamWorkspace(seniorLawyer),
+      team: formatTeamWorkspace(team, seniorLawyer._id),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -2141,48 +2183,38 @@ exports.rejectLawyerTeamRequest = async (req, res) => {
   try {
     const seniorLawyer = await User.findById(req.user._id);
 
-    if (!seniorLawyer || seniorLawyer.role !== 'lawyer' || seniorLawyer.lawyerProfile?.team?.role !== 'owner') {
+    if (!seniorLawyer || seniorLawyer.role !== 'lawyer') {
       return res.status(403).json({ message: 'Only the senior lawyer can reject team requests' });
     }
 
-    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
-      ? seniorLawyer.lawyerProfile.toObject()
-      : (seniorLawyer.lawyerProfile || {});
-    const seniorTeam = seniorProfile.team || {};
-    const pendingRequests = Array.isArray(seniorTeam.pendingRequests) ? seniorTeam.pendingRequests : [];
+    const team = await getOwnedTeamForRequest(seniorLawyer._id, req.params.requestId, req.query.teamId);
+    const pendingRequests = Array.isArray(team.pendingRequests) ? team.pendingRequests : [];
     const request = pendingRequests.find((item) => String(item._id) === String(req.params.requestId));
 
     if (!request) {
       return res.status(404).json({ message: 'Join request not found' });
     }
 
-    seniorLawyer.set('lawyerProfile', {
-      ...seniorProfile,
-      team: {
-        ...seniorTeam,
-        pendingRequests: pendingRequests.filter((item) => String(item._id) !== String(req.params.requestId)),
-      },
-    });
-
-    await seniorLawyer.save();
+    team.pendingRequests = pendingRequests.filter((item) => String(item._id) !== String(req.params.requestId));
+    await team.save();
 
     await createNotification({
       recipient: request.lawyerId,
       actor: seniorLawyer._id,
       type: 'team_join_rejected',
       title: 'Team request rejected',
-      message: `${getLawyerName(seniorLawyer)} rejected your request to join ${seniorTeam.firmName || 'the team'}.`,
-      link: '/lawyer-dash?section=team',
-      metadata: { teamCode: seniorTeam.teamCode, seniorLawyerId: seniorLawyer._id },
+      message: `${getLawyerName(seniorLawyer)} rejected your request to join ${team.firmName || 'the team'}.`,
+      link: `/lawyer-dash?section=team&teamId=${team._id}`,
+      metadata: { teamId: team._id, teamCode: team.teamCode, seniorLawyerId: seniorLawyer._id },
       io: req.app.get('socketio'),
     });
 
     res.json({
       message: 'Join request rejected',
-      team: formatTeamWorkspace(seniorLawyer),
+      team: formatTeamWorkspace(team, seniorLawyer._id),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -2191,7 +2223,7 @@ exports.removeLawyerTeamMember = async (req, res) => {
   try {
     const seniorLawyer = await User.findById(req.user._id);
 
-    if (!seniorLawyer || seniorLawyer.role !== 'lawyer' || seniorLawyer.lawyerProfile?.team?.role !== 'owner') {
+    if (!seniorLawyer || seniorLawyer.role !== 'lawyer') {
       return res.status(403).json({ message: 'Only the senior lawyer can remove team members' });
     }
 
@@ -2200,54 +2232,34 @@ exports.removeLawyerTeamMember = async (req, res) => {
       return res.status(400).json({ message: 'You cannot remove yourself from your team' });
     }
 
-    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
-      ? seniorLawyer.lawyerProfile.toObject()
-      : (seniorLawyer.lawyerProfile || {});
-    const seniorTeam = seniorProfile.team || {};
-    const members = Array.isArray(seniorTeam.members) ? seniorTeam.members : [];
+    const team = await getTeamForOwnerAction(seniorLawyer._id, req.query.teamId);
+    const members = Array.isArray(team.members) ? team.members : [];
     const member = members.find((item) => String(item.lawyerId) === memberId);
 
     if (!member) {
       return res.status(404).json({ message: 'Team member not found' });
     }
 
-    seniorLawyer.set('lawyerProfile', {
-      ...seniorProfile,
-      team: {
-        ...seniorTeam,
-        members: members.filter((item) => String(item.lawyerId) !== memberId),
-      },
-    });
-
-    const juniorLawyer = await User.findById(memberId);
-    if (juniorLawyer) {
-      const juniorProfile = juniorLawyer.lawyerProfile?.toObject
-        ? juniorLawyer.lawyerProfile.toObject()
-        : (juniorLawyer.lawyerProfile || {});
-      delete juniorProfile.team;
-      juniorLawyer.set('lawyerProfile', juniorProfile);
-      await juniorLawyer.save();
-    }
-
-    await seniorLawyer.save();
+    team.members = members.filter((item) => String(item.lawyerId) !== memberId);
+    await team.save();
 
     await createNotification({
       recipient: memberId,
       actor: seniorLawyer._id,
       type: 'team_member_removed',
       title: 'Removed from team',
-      message: `${getLawyerName(seniorLawyer)} removed you from ${seniorTeam.firmName || 'the team'}.`,
+      message: `${getLawyerName(seniorLawyer)} removed you from ${team.firmName || 'the team'}.`,
       link: '/lawyer-dash?section=team',
-      metadata: { teamCode: seniorTeam.teamCode, seniorLawyerId: seniorLawyer._id },
+      metadata: { teamId: team._id, teamCode: team.teamCode, seniorLawyerId: seniorLawyer._id },
       io: req.app.get('socketio'),
     });
 
     res.json({
       message: 'Team member removed',
-      team: formatTeamWorkspace(seniorLawyer),
+      team: formatTeamWorkspace(team, seniorLawyer._id),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -2260,21 +2272,13 @@ exports.getLawyerTeamWorkspace = async (req, res) => {
       return res.status(403).json({ message: 'Only lawyers can access a team workspace' });
     }
 
-    if (!lawyer.lawyerProfile?.team?.teamCode) {
-      return res.status(404).json({ message: 'Create or join a team first' });
-    }
-
-    const seniorLawyer = await findTeamOwnerForLawyer(lawyer);
-    if (!seniorLawyer) {
-      return res.status(404).json({ message: 'Team not found' });
-    }
+    const teams = await getLawyerTeamDocuments(lawyer._id);
+    const selectedTeam = teams.find((team) => String(team._id) === String(req.query.teamId)) || teams[0] || null;
 
     res.json({
-      team: {
-        ...formatTeamWorkspace(seniorLawyer),
-        role: lawyer.lawyerProfile.team.role || 'member',
-        joinedAt: lawyer.lawyerProfile.team.joinedAt,
-      },
+      team: selectedTeam ? formatTeamWorkspace(selectedTeam, lawyer._id) : null,
+      teams: teams.map((team) => formatTeamWorkspace(team, lawyer._id)),
+      activeTeamId: selectedTeam?._id || null,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -2290,14 +2294,7 @@ exports.addLawyerTeamCase = async (req, res) => {
       return res.status(403).json({ message: 'Only lawyers can add team cases' });
     }
 
-    if (!lawyer.lawyerProfile?.team?.teamCode) {
-      return res.status(404).json({ message: 'Create or join a team first' });
-    }
-
-    const seniorLawyer = await findTeamOwnerForLawyer(lawyer);
-    if (!seniorLawyer) {
-      return res.status(404).json({ message: 'Team not found' });
-    }
+    const team = await getTeamForMemberAction(lawyer._id, req.query.teamId || req.body.teamId);
 
     const clientName = trimString(req.body.clientName);
     const caseTitle = trimString(req.body.caseTitle);
@@ -2320,12 +2317,6 @@ exports.addLawyerTeamCase = async (req, res) => {
       return res.status(400).json({ message: 'Invalid hearing date' });
     }
 
-    const seniorProfile = seniorLawyer.lawyerProfile?.toObject
-      ? seniorLawyer.lawyerProfile.toObject()
-      : (seniorLawyer.lawyerProfile || {});
-    const seniorTeam = seniorProfile.team || {};
-    const existingCases = Array.isArray(seniorTeam.cases) ? seniorTeam.cases : [];
-
     const teamCase = {
       clientName,
       caseTitle,
@@ -2341,24 +2332,17 @@ exports.addLawyerTeamCase = async (req, res) => {
       updatedAt: new Date(),
     };
 
-    seniorLawyer.set('lawyerProfile', {
-      ...seniorProfile,
-      team: {
-        ...seniorTeam,
-        cases: [teamCase, ...existingCases],
-      },
-    });
+    team.cases.unshift(teamCase);
+    await team.save();
 
-    await seniorLawyer.save();
-
-    const savedCase = seniorLawyer.lawyerProfile.team.cases[0];
+    const savedCase = team.cases[0];
     res.status(201).json({
       message: 'Team case added',
       case: formatTeamCase(savedCase),
-      team: formatTeamWorkspace(seniorLawyer),
+      team: formatTeamWorkspace(team, lawyer._id),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -2371,10 +2355,6 @@ exports.updateLawyerTeamCaseStatus = async (req, res) => {
       return res.status(403).json({ message: 'Only lawyers can update team cases' });
     }
 
-    if (!lawyer.lawyerProfile?.team?.teamCode) {
-      return res.status(404).json({ message: 'Create or join a team first' });
-    }
-
     const status = trimString(req.body.status);
     const allowedStatuses = ['new', 'in_progress', 'hearing_scheduled', 'closed'];
 
@@ -2382,27 +2362,24 @@ exports.updateLawyerTeamCaseStatus = async (req, res) => {
       return res.status(400).json({ message: 'Invalid case status' });
     }
 
-    const seniorLawyer = await findTeamOwnerForLawyer(lawyer);
-    if (!seniorLawyer) {
-      return res.status(404).json({ message: 'Team not found' });
-    }
+    const team = await getTeamForOwnerAction(lawyer._id, req.query.teamId || req.body.teamId);
 
-    const teamCase = seniorLawyer.lawyerProfile?.team?.cases?.id(req.params.caseId);
+    const teamCase = team.cases.id(req.params.caseId);
     if (!teamCase) {
       return res.status(404).json({ message: 'Team case not found' });
     }
 
     teamCase.status = status;
     teamCase.updatedAt = new Date();
-    await seniorLawyer.save();
+    await team.save();
 
     res.json({
       message: 'Case status updated',
       case: formatTeamCase(teamCase),
-      team: formatTeamWorkspace(seniorLawyer),
+      team: formatTeamWorkspace(team, lawyer._id),
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
