@@ -286,6 +286,7 @@ const generateTeamCode = async () => {
     if (!existingTeam && !existingLegacyTeam) return code;
   }
 
+
   const error = new Error('Unable to generate a team code. Please try again.');
   error.statusCode = 500;
   throw error;
@@ -307,7 +308,7 @@ const formatTeamCase = (teamCase) => ({
   hearingDate: teamCase.hearingDate || null,
   documents: Array.isArray(teamCase.documents) ? teamCase.documents : [],
   status: teamCase.status || 'new',
-  addedBy: teamCase.addedBy || null,
+  addedBy: teamCase.addedBy?._id ? String(teamCase.addedBy._id) : (teamCase.addedBy ? String(teamCase.addedBy) : null),
   addedByName: teamCase.addedByName || 'Lawyer',
   createdAt: teamCase.createdAt,
   updatedAt: teamCase.updatedAt,
@@ -338,7 +339,7 @@ const formatTeamWorkspace = (team, viewerId) => {
   const isOwner = String(team?.owner) === String(viewerId);
   const visibleCases = isOwner
     ? cases
-    : cases.filter((teamCase) => String(teamCase.addedBy) === String(viewerId));
+    : cases.filter((teamCase) => String(teamCase.addedBy?._id || teamCase.addedBy || '') === String(viewerId));
 
   return {
     id: team._id,
