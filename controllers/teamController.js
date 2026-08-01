@@ -117,7 +117,7 @@ const getWorkspace = async (userId, selectedTeamId) => {
     firmName: activeTeam.firmName,
     seniorLawyerName: activeTeam.seniorLawyerName,
     maxTeamSize: activeTeam.maxTeamSize,
-    seniorLawyer: activeTeam.owner,
+    seniorLawyer: activeTeam.ownerId || activeTeam.owner,
     members,
     pendingRequests: pendingRequests.map((item) => ({
       id: String(item._id), lawyerId: item.requesterId?._id || item.requesterId,
@@ -148,7 +148,7 @@ exports.createTeam = async (req, res) => {
     if (!firmName || !Number.isInteger(maxTeamSize) || maxTeamSize < 2) throw domainError(400, 'Firm name and a team size of at least 2 are required');
     const teamCode = await generateTeamCode();
     const team = await runInTransaction(async (session) => {
-      const [created] = await Team.create([{ teamCode, firmName, seniorLawyerName, maxTeamSize, owner: req.user._id, createdBy: req.user._id }], { session });
+      const [created] = await Team.create([{ teamCode, firmName, seniorLawyerName, maxTeamSize, owner: req.user._id, ownerId: req.user._id, createdBy: req.user._id }], { session });
       await TeamMember.create([{ teamId: created._id, userId: req.user._id, role: 'owner', addedBy: req.user._id }], { session });
       await recordActivity({ teamId: created._id, actorId: req.user._id, entityType: 'team', entityId: created._id, action: 'team.created', after: { firmName, teamCode }, requestId: requestId(req), session });
       return created;
@@ -164,7 +164,7 @@ exports.requestToJoin = async (req, res) => {
     if (!teamCode) throw domainError(400, 'Team code is required');
     const team = await Team.findOne({ teamCode, status: 'active' }).lean();
     if (!team) throw domainError(404, 'Team not found');
-    if (String(team.owner) === String(req.user._id)) throw domainError(400, 'You already own this team');
+    if (String(team.ownerId || team.owner) === String(req.user._id)) throw domainError(400, 'You already own this team');
     const result = await runInTransaction(async (session) => {
       const member = await TeamMember.findOne({ teamId: team._id, userId: req.user._id, status: 'active' }).session(session);
       if (member) throw domainError(409, 'You are already a member of this team');
@@ -177,8 +177,9 @@ exports.requestToJoin = async (req, res) => {
       await recordActivity({ teamId: team._id, actorId: req.user._id, entityType: 'team_join_request', entityId: request._id, action: 'team.join_request.created', requestId: requestId(req), session });
       return request;
     });
-    await createNotification({ recipient: team.owner, actor: req.user._id, type: 'team_join_request', title: 'New team join request', message: `${getDisplayName(req.user)} requested to join ${team.firmName}.`, link: `/lawyer-dash?section=team&teamId=${team._id}`, metadata: { teamId: team._id, requestId: result._id }, io: req.app.get('socketio') });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [team.owner], event: 'team:join-request-created', teamId: team._id, payload: { requestId: String(result._id) } });
+    const teamOwnerId = team.ownerId || team.owner;
+    await createNotification({ recipient: teamOwnerId, actor: req.user._id, type: 'team_join_request', title: 'New team join request', message: `${getDisplayName(req.user)} requested to join ${team.firmName}.`, link: `/lawyer-dash?section=team&teamId=${team._id}`, metadata: { teamId: team._id, requestId: result._id }, io: req.app.get('socketio') });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [teamOwnerId], event: 'team:join-request-created', teamId: team._id, payload: { requestId: String(result._id) } });
     res.status(202).json({ message: 'Join request sent to the Team Owner', requestPending: true, requestId: result._id });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -213,7 +214,7 @@ exports.removeMember = async (req, res) => {
     assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.memberId, 'Member');
     const result = await runInTransaction(async (session) => {
       const { team } = await requireTeamOwner(req.params.teamId, req.user._id, { session });
-      if (String(team.owner) === String(req.params.memberId)) throw domainError(400, 'The Team Owner cannot be removed');
+      if (String(team.ownerId || team.owner) === String(req.params.memberId)) throw domainError(400, 'The Team Owner cannot be removed');
       const member = await TeamMember.findOne({ teamId: team._id, userId: req.params.memberId, role: 'member', status: 'active' }).session(session);
       if (!member) throw domainError(404, 'Active Team Member not found');
       member.status = 'removed'; member.leftAt = new Date(); member.removedBy = req.user._id; member.removalReason = trim(req.body.reason); await member.save({ session });
@@ -245,7 +246,7 @@ exports.createCase = async (req, res) => {
     });
     const membership = await TeamMember.findOne({ teamId: req.params.teamId, userId: req.user._id, status: 'active' }).lean();
     const team = await Team.findById(req.params.teamId).lean();
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.owner], event: 'case:created', teamId: req.params.teamId, payload: { caseId: String(result._id), ownerId: String(req.user._id) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'case:created', teamId: req.params.teamId, payload: { caseId: String(result._id), ownerId: String(req.user._id) } });
     res.status(201).json({ message: 'Case created', case: formatCase(result, [], req.user._id), membershipRole: membership.role });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -267,7 +268,7 @@ exports.updateCase = async (req, res) => {
     if (!changedFields.length) throw domainError(400, 'No editable case fields were supplied');
     legalCase.updatedBy = req.user._id; await legalCase.save();
     await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields, before, after: changedFields.reduce((data, field) => ({ ...data, [field]: legalCase[field] }), {}), requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.owner], event: changedFields.includes('status') ? 'case:status-changed' : 'case:updated', teamId: team._id, payload: { caseId: String(legalCase._id), ownerId: String(legalCase.ownerId), changedFields } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: changedFields.includes('status') ? 'case:status-changed' : 'case:updated', teamId: team._id, payload: { caseId: String(legalCase._id), ownerId: String(legalCase.ownerId), changedFields } });
     res.json({ message: 'Case updated', case: formatCase(legalCase, [], req.user._id) });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -280,7 +281,7 @@ exports.deleteCase = async (req, res) => {
       await Promise.all([LegalCase.deleteOne({ _id: legalCase._id }).session(session), Hearing.deleteMany({ caseId: legalCase._id }).session(session), CaseDocument.updateMany({ caseId: legalCase._id }, { deletedAt: new Date(), deletedBy: req.user._id }).session(session)]);
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.deleted', before: { title: legalCase.title, ownerId: legalCase.ownerId }, requestId: requestId(req), session });
     });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.owner], event: 'case:deleted', teamId: team._id, payload: { caseId: String(legalCase._id), ownerId: String(legalCase.ownerId) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'case:deleted', teamId: team._id, payload: { caseId: String(legalCase._id), ownerId: String(legalCase.ownerId) } });
     res.json({ message: 'Case deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -301,7 +302,7 @@ exports.createHearing = async (req, res) => {
       legalCase.nextHearingAt = scheduledAt; legalCase.updatedBy = req.user._id; await legalCase.save();
     }
     await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { scheduledAt }, requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.owner], event: 'hearing:created', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'hearing:created', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
     res.status(201).json({ hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -316,7 +317,7 @@ exports.updateHearing = async (req, res) => {
     if (req.body.scheduledAt !== undefined) { const scheduledAt = new Date(req.body.scheduledAt); if (Number.isNaN(scheduledAt.getTime())) throw domainError(400, 'Invalid hearing date'); hearing.scheduledAt = scheduledAt; }
     hearing.updatedBy = req.user._id; await hearing.save();
     await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.owner], event: 'hearing:updated', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'hearing:updated', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
     res.json({ hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -328,7 +329,7 @@ exports.deleteHearing = async (req, res) => {
     const hearing = await Hearing.findOneAndDelete({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id });
     if (!hearing) throw domainError(404, 'Hearing not found');
     await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.owner], event: 'hearing:deleted', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'hearing:deleted', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
     res.json({ message: 'Hearing deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };

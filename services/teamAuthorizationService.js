@@ -28,7 +28,8 @@ const requireActiveMembership = async (teamId, userId, options = {}) => {
 
 const requireTeamOwner = async (teamId, userId, options = {}) => {
   const context = await requireActiveMembership(teamId, userId, options);
-  if (context.membership.role !== 'owner' || String(context.team.owner) !== String(userId)) {
+  const ownerId = context.team.ownerId || context.team.owner;
+  if (context.membership.role !== 'owner' || String(ownerId) !== String(userId)) {
     throw domainError(403, 'Only the Team Owner can perform this action');
   }
   return context;

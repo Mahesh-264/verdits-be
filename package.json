@@ -7,7 +7,10 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "migrate:team-domain": "node scripts/migrateTeamDomain.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "migrate:team-domain:apply": "node scripts/migrateTeamDomain.js --apply",
+    "verify:team-domain": "node scripts/verifyTeamDomain.js",
+    "verify:team-authorization": "node scripts/verifyTeamAuthorization.js",
+    "test": "node --test tests/teamAuthorization.test.js"
   },
   "keywords": [],
   "author": "",

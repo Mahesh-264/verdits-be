@@ -40,6 +40,7 @@ const ensureTeamsFromLegacyUsers = async () => {
       seniorLawyerName: legacy.seniorLawyerName || `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || 'Team Owner',
       maxTeamSize: Number(legacy.maxTeamSize) || 2,
       owner: owner._id,
+      ownerId: owner._id,
       createdBy: owner._id,
       members: legacy.members || [],
       pendingRequests: legacy.pendingRequests || [],
@@ -51,9 +52,9 @@ const ensureTeamsFromLegacyUsers = async () => {
 };
 
 const migrateTeam = async (team) => withTransaction(async (session) => {
-  await Team.updateOne(
+  await Team.collection.updateOne(
     { _id: team._id },
-    { $set: { status: team.status || 'active', createdBy: team.createdBy || team.owner } },
+    { $set: { status: team.status || 'active', createdBy: team.createdBy || team.owner, ownerId: team.ownerId || team.owner } },
     { session }
   );
   const upsertMember = async (userId, role, joinedAt = team.createdAt) => {

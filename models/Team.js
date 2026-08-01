@@ -45,9 +45,11 @@ const teamSchema = new mongoose.Schema({
   firmName: { type: String, required: true },
   seniorLawyerName: { type: String, required: true },
   maxTeamSize: { type: Number, min: 2, required: true },
-  // `owner` is retained for backwards-compatible reads while TeamMember
-  // becomes the authoritative membership record in the normalized model.
+  // `owner` is retained only for legacy records/routes during migration.
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
+  // The normalized, team-scoped owner identity. It must match exactly one
+  // active TeamMember with role `owner`.
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', immutable: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', immutable: true },
   status: {
     type: String,
@@ -66,6 +68,7 @@ const teamSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 teamSchema.index({ owner: 1 });
+teamSchema.index({ ownerId: 1, status: 1 });
 teamSchema.index({ createdBy: 1, status: 1 });
 teamSchema.index({ 'members.lawyerId': 1 });
 teamSchema.index({ 'pendingRequests.lawyerId': 1 });
