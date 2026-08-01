@@ -45,13 +45,28 @@ const teamSchema = new mongoose.Schema({
   firmName: { type: String, required: true },
   seniorLawyerName: { type: String, required: true },
   maxTeamSize: { type: Number, min: 2, required: true },
-  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  // `owner` is retained for backwards-compatible reads while TeamMember
+  // becomes the authoritative membership record in the normalized model.
+  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', immutable: true },
+  status: {
+    type: String,
+    enum: ['active', 'archived'],
+    default: 'active',
+    index: true,
+  },
+  settings: {
+    allowJoinRequests: { type: Boolean, default: true },
+  },
+  // Legacy embedded fields. They remain only until the migration and API
+  // cutover phases are complete; new normalized writes must not target them.
   members: [teamMemberSchema],
   pendingRequests: [teamRequestSchema],
   cases: [teamCaseSchema],
 }, { timestamps: true });
 
 teamSchema.index({ owner: 1 });
+teamSchema.index({ createdBy: 1, status: 1 });
 teamSchema.index({ 'members.lawyerId': 1 });
 teamSchema.index({ 'pendingRequests.lawyerId': 1 });
 
