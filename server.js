@@ -14,6 +14,7 @@ const cors = require('cors');
 const morgan = require('morgan');
 const connectDB = require('./config/db');
 const { createNotification, getDisplayName } = require('./services/notificationService');
+const TeamMember = require('./models/TeamMember');
 
 const app = express();
 const server = http.createServer(app); 
@@ -48,9 +49,16 @@ io.use((socket, next) => {
     }
 });
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
     console.log(`🔗 Connected: ${socket.userId}`);
-    socket.join(socket.userId); 
+    socket.join(socket.userId);
+    socket.join(`user:${socket.userId}`);
+    try {
+        const memberships = await TeamMember.find({ userId: socket.userId, status: 'active' }).select('teamId').lean();
+        memberships.forEach((membership) => socket.join(`team:${membership.teamId}`));
+    } catch (error) {
+        console.error('Unable to join team socket rooms:', error.message);
+    }
 
     socket.on("sendMessage", async ({ receiverId, content, messageType = 'text' }) => {
         try {
@@ -184,6 +192,7 @@ app.use('/api/ai', require('./routes/aiRoutes'));
 app.use('/api/chat', require('./routes/chatRoutes')); 
 app.use('/api/appointments', require('./routes/appointmentRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
+app.use('/api/teams', require('./routes/teamRoutes'));
 
 app.use((err, req, res, next) => {
     console.error("❌ SERVER CRASH PREVENTED ❌");

@@ -24,6 +24,9 @@ const caseSchema = new mongoose.Schema(
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     archivedAt: { type: Date, default: null },
     archivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    // Idempotency markers used only by the legacy embedded-case migration.
+    legacyTeamId: { type: String, trim: true, default: undefined, immutable: true },
+    legacyCaseId: { type: String, trim: true, default: undefined, immutable: true },
   },
   { timestamps: true }
 );
@@ -31,5 +34,6 @@ const caseSchema = new mongoose.Schema(
 caseSchema.index({ teamId: 1, ownerId: 1, status: 1, updatedAt: -1 });
 caseSchema.index({ teamId: 1, status: 1, nextHearingAt: 1 });
 caseSchema.index({ ownerId: 1, updatedAt: -1 });
+caseSchema.index({ legacyTeamId: 1, legacyCaseId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Case', caseSchema);
