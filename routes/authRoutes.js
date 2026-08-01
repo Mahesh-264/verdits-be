@@ -10,6 +10,10 @@ const {
   otpLimiter,
 } = require('../middleware/authRateLimiters');
 
+const retiredTeamEndpoint = (req, res) => res.status(410).json({
+  message: 'This legacy Team endpoint has been retired. Use /api/teams.',
+});
+
 const resumeUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -85,14 +89,16 @@ router.post('/jam-sessions/:sessionId/comments', authorize('student', 'lawyer'),
 router.get('/lawyer/student-interactions', authorize('lawyer'), authController.getLawyerStudentInteractions);
 router.post('/lawyer/internships', authorize('lawyer'), authController.createLawyerInternship);
 router.post('/lawyer/jam-sessions', authorize('lawyer'), authController.createLawyerJamSession);
-router.get('/lawyer/team', authorize('lawyer'), authController.getLawyerTeamWorkspace);
-router.post('/lawyer/team', authorize('lawyer'), authController.createLawyerTeam);
-router.post('/lawyer/team/join', authorize('lawyer'), authController.joinLawyerTeam);
-router.patch('/lawyer/team/requests/:requestId/accept', authorize('lawyer'), authController.acceptLawyerTeamRequest);
-router.patch('/lawyer/team/requests/:requestId/reject', authorize('lawyer'), authController.rejectLawyerTeamRequest);
-router.delete('/lawyer/team/members/:memberId', authorize('lawyer'), authController.removeLawyerTeamMember);
-router.post('/lawyer/team/cases', authorize('lawyer'), authController.addLawyerTeamCase);
-router.patch('/lawyer/team/cases/:caseId/status', authorize('lawyer'), authController.updateLawyerTeamCaseStatus);
+// The normalized /api/teams API is the sole Team/Case mutation surface.
+// Keeping these paths reachable would allow bypassing TeamMember authorization.
+router.get('/lawyer/team', authorize('lawyer'), retiredTeamEndpoint);
+router.post('/lawyer/team', authorize('lawyer'), retiredTeamEndpoint);
+router.post('/lawyer/team/join', authorize('lawyer'), retiredTeamEndpoint);
+router.patch('/lawyer/team/requests/:requestId/accept', authorize('lawyer'), retiredTeamEndpoint);
+router.patch('/lawyer/team/requests/:requestId/reject', authorize('lawyer'), retiredTeamEndpoint);
+router.delete('/lawyer/team/members/:memberId', authorize('lawyer'), retiredTeamEndpoint);
+router.post('/lawyer/team/cases', authorize('lawyer'), retiredTeamEndpoint);
+router.patch('/lawyer/team/cases/:caseId/status', authorize('lawyer'), retiredTeamEndpoint);
 router.post('/lawyer/internships/:postId/like', authorize('student', 'lawyer'), authController.toggleInternshipLike);
 router.post('/lawyer/internships/:postId/comments', authorize('student', 'lawyer'), authController.addInternshipComment);
 router.patch('/lawyer/internships/:postId/toggle-status', authorize('lawyer'), authController.toggleInternshipStatus);

@@ -15,6 +15,7 @@ const morgan = require('morgan');
 const connectDB = require('./config/db');
 const { createNotification, getDisplayName } = require('./services/notificationService');
 const TeamMember = require('./models/TeamMember');
+const User = require('./models/User');
 
 const app = express();
 const server = http.createServer(app); 
@@ -35,14 +36,16 @@ const io = new Server(server, {
     cors: corsOptions
 });
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error("Authentication error: Token missing"));
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        socket.userId = decoded.id;
-        socket.userRole = decoded.role;
+        const user = await User.findById(decoded.id).select('role accountStatus').lean();
+        if (!user || (user.accountStatus && user.accountStatus !== 'active')) return next(new Error("Authentication error: Account unavailable"));
+        socket.userId = String(user._id);
+        socket.userRole = user.role;
         next();
     } catch (err) {
         next(new Error("Authentication error: Invalid token"));
