@@ -11,6 +11,7 @@ const User = require('../models/User');
 const { createNotification, getDisplayName } = require('../services/notificationService');
 const { recordActivity } = require('../services/activityService');
 const { emitTeamEvent } = require('../services/teamRealtimeService');
+const { runInTransaction } = require('../utils/transaction');
 const {
   assertObjectId,
   domainError,
@@ -23,17 +24,6 @@ const {
 const trim = (value) => String(value || '').trim();
 const requestId = (req) => req.headers['x-request-id'] || '';
 const caseStatuses = new Set(['new', 'in_progress', 'hearing_scheduled', 'closed']);
-
-const runInTransaction = async (work) => {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => { result = await work(session); });
-    return result;
-  } finally {
-    await session.endSession();
-  }
-};
 
 const generateTeamCode = async () => {
   for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -248,7 +238,34 @@ exports.createCase = async (req, res) => {
     const team = await Team.findById(req.params.teamId).lean();
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'case:created', teamId: req.params.teamId, payload: { caseId: String(result._id), ownerId: String(req.user._id) } });
     res.status(201).json({ message: 'Case created', case: formatCase(result, [], req.user._id), membershipRole: membership.role });
-  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+  } catch (error) {
+    console.error('CREATE CASE ERROR');
+    console.error(error);
+    console.error(error.message);
+    console.error(error.stack);
+
+    if (error?.name?.startsWith('Mongo') || error?.code || error?.codeName || error?.errorLabels || error?.cause) {
+      console.error('CREATE CASE MONGODB ERROR DETAILS', {
+        code: error.code,
+        codeName: error.codeName,
+        errorLabels: error.errorLabels,
+        cause: error.cause,
+      });
+    }
+
+    if (error?.name === 'ValidationError' || error?.errors) {
+      console.error('CREATE CASE VALIDATION DETAILS', Object.fromEntries(
+        Object.entries(error.errors || {}).map(([path, detail]) => [path, {
+          kind: detail.kind,
+          message: detail.message,
+          name: detail.name,
+          value: detail.value,
+        }])
+      ));
+    }
+
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
 };
 
 exports.updateCase = async (req, res) => {

@@ -17,10 +17,8 @@ const getActiveMembership = async (teamId, userId, options = {}) => {
 };
 
 const requireActiveMembership = async (teamId, userId, options = {}) => {
-  const [team, membership] = await Promise.all([
-    Team.findOne({ _id: teamId, status: 'active' }).session(options.session || null).lean(),
-    getActiveMembership(teamId, userId, options),
-  ]);
+  const team = await Team.findOne({ _id: teamId, status: 'active' }).session(options.session || null).lean();
+  const membership = await getActiveMembership(teamId, userId, options);
   if (!team) throw domainError(404, 'Team not found');
   if (!membership) throw domainError(403, 'You are not an active member of this team');
   return { team, membership };
