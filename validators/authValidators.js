@@ -8,6 +8,8 @@ const normalizeEmail = (value) => trimString(value).toLowerCase();
 const normalizePhone = (value) => trimString(value);
 const isEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const isPhone = (value) => /^\+?[0-9]{10,15}$/.test(String(value || '').replace(/[\s-]/g, ''));
+const isValidPassword = (value) => /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(String(value || ''));
+const passwordRequirementsMessage = 'Password must include at least 1 capital letter, 1 special character, and 1 number.';
 const isScalar = (value) => typeof value === 'string' || typeof value === 'number';
 const hasValue = (value) => {
   if (Array.isArray(value)) {
@@ -63,9 +65,11 @@ const validateEmailRegistration = (body) => {
     throw error;
   }
 
-  if (String(body.password).length < 8 || !/[A-Za-z]/.test(body.password) || !/\d/.test(body.password)) {
-    const error = new Error('Password must be at least 8 characters and include a letter and number.');
+  if (!isValidPassword(body.password)) {
+    const error = new Error(passwordRequirementsMessage);
     error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = 'password';
     throw error;
   }
 
@@ -90,9 +94,11 @@ const validateGoogleProfile = (body) => {
 
   requireFields(body, ['phone', 'password', 'confirmPassword']);
 
-  if (String(body.password || '').length < 8) {
-    const error = new Error('Password must be at least 8 characters');
+  if (!isValidPassword(body.password)) {
+    const error = new Error(passwordRequirementsMessage);
     error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = 'password';
     throw error;
   }
 
@@ -115,9 +121,11 @@ const validatePasswordReset = (body) => {
     throw error;
   }
 
-  if (String(body.password).length < 8) {
-    const error = new Error('Password must be at least 8 characters');
+  if (!isValidPassword(body.password)) {
+    const error = new Error(passwordRequirementsMessage);
     error.statusCode = 400;
+    error.code = 'VALIDATION_ERROR';
+    error.field = 'password';
     throw error;
   }
 
