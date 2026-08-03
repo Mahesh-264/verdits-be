@@ -14,6 +14,8 @@ const cors = require('cors');
 const morgan = require('morgan');
 const connectDB = require('./config/db');
 const { createNotification, getDisplayName } = require('./services/notificationService');
+const TeamMember = require('./models/TeamMember');
+const User = require('./models/User');
 
 const app = express();
 const server = http.createServer(app); 
@@ -34,23 +36,32 @@ const io = new Server(server, {
     cors: corsOptions
 });
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error("Authentication error: Token missing"));
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        socket.userId = decoded.id;
-        socket.userRole = decoded.role;
+        const user = await User.findById(decoded.id).select('role accountStatus').lean();
+        if (!user || (user.accountStatus && user.accountStatus !== 'active')) return next(new Error("Authentication error: Account unavailable"));
+        socket.userId = String(user._id);
+        socket.userRole = user.role;
         next();
     } catch (err) {
         next(new Error("Authentication error: Invalid token"));
     }
 });
 
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
     console.log(`🔗 Connected: ${socket.userId}`);
-    socket.join(socket.userId); 
+    socket.join(socket.userId);
+    socket.join(`user:${socket.userId}`);
+    try {
+        const memberships = await TeamMember.find({ userId: socket.userId, status: 'active' }).select('teamId').lean();
+        memberships.forEach((membership) => socket.join(`team:${membership.teamId}`));
+    } catch (error) {
+        console.error('Unable to join team socket rooms:', error.message);
+    }
 
     socket.on("sendMessage", async ({ receiverId, content, messageType = 'text' }) => {
         try {
@@ -184,6 +195,7 @@ app.use('/api/ai', require('./routes/aiRoutes'));
 app.use('/api/chat', require('./routes/chatRoutes')); 
 app.use('/api/appointments', require('./routes/appointmentRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
+app.use('/api/teams', require('./routes/teamRoutes'));
 
 app.use((err, req, res, next) => {
     console.error("❌ SERVER CRASH PREVENTED ❌");
