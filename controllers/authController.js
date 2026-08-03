@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const Team = require('../models/Team');
+const Post = require('../models/Post');
 const Otp = require('../models/Otp');
 const PendingRegistration = require('../models/PendingRegistration');
 const VerificationOtp = require('../models/VerificationOtp');
@@ -3060,13 +3061,54 @@ exports.getPublishedInternships = async (req, res) => {
       .select(sanitizeUser)
       .sort({ createdAt: -1 });
 
-    const internships = lawyers.flatMap((lawyer) =>
+    const legacyInternships = lawyers.flatMap((lawyer) =>
       (lawyer.lawyerProfile?.internships || []).map((internship) =>
         formatPublishedInternship(lawyer, internship, { viewerId })
       )
-    ).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
+    );
 
-    res.json(internships);
+    let postInternships = [];
+    try {
+      const posts = await Post.find({ type: 'internship' })
+        .populate('createdBy', 'firstName lastName role profileImage lawyerProfile address')
+        .sort({ createdAt: -1 });
+
+      postInternships = posts.map((post) => {
+        const creator = post.createdBy || {};
+        const creatorName = `${creator.firstName || ''} ${creator.lastName || ''}`.trim() || 'Lawyer';
+        return {
+          id: post._id,
+          type: 'internship',
+          lawyerId: creator._id,
+          lawyerName: creatorName,
+          profileImage: creator.profileImage || '',
+          avatar: creatorName.charAt(0).toUpperCase(),
+          title: post.title || 'Internship',
+          firm: creator.address?.city || creator.address?.district || 'Lawin',
+          specialization: post.tags || [],
+          description: post.content || post.description || '',
+          duration: post.duration || 'Not specified',
+          location: post.location || 'Not specified',
+          stipend: post.stipend || 'Not specified',
+          skills: post.tags || [],
+          status: post.status || 'open',
+          createdAt: post.createdAt,
+          postedAt: getRelativeTime(post.createdAt),
+          applicationCount: post.applicationCount || 0,
+          likesCount: Array.isArray(post.likedBy) ? post.likedBy.length : 0,
+          liked: (post.likedBy || []).some((id) => String(id) === String(viewerId)),
+          commentsCount: Array.isArray(post.comments) ? post.comments.length : 0,
+        };
+      });
+    } catch {
+      postInternships = [];
+    }
+
+    const internships = [...legacyInternships, ...postInternships].sort(
+      (first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0)
+    );
+
+    res.json({ internships });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -3080,13 +3122,51 @@ exports.getPublishedJamSessions = async (req, res) => {
       .select(sanitizeUser)
       .sort({ createdAt: -1 });
 
-    const jamSessions = lawyers.flatMap((lawyer) =>
+    const legacyJamSessions = lawyers.flatMap((lawyer) =>
       (lawyer.lawyerProfile?.jamSessions || []).map((session) =>
         formatPublishedJamSession(lawyer, session, { viewerId })
       )
-    ).sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0));
+    );
 
-    res.json(jamSessions);
+    let postJamSessions = [];
+    try {
+      const posts = await Post.find({ type: 'jam' })
+        .populate('createdBy', 'firstName lastName role profileImage lawyerProfile address')
+        .sort({ createdAt: -1 });
+
+      postJamSessions = posts.map((post) => {
+        const creator = post.createdBy || {};
+        const creatorName = `${creator.firstName || ''} ${creator.lastName || ''}`.trim() || 'Lawyer';
+        return {
+          id: post._id,
+          type: 'jam',
+          lawyerId: creator._id,
+          lawyerName: creatorName,
+          author: creatorName,
+          profileImage: creator.profileImage || '',
+          avatar: creatorName.charAt(0).toUpperCase(),
+          title: post.title || 'Jam Session',
+          topic: post.topic || post.tags?.[0] || 'General Discussion',
+          summary: post.content || post.summary || '',
+          schedule: post.schedule || 'To be announced',
+          location: post.location || 'Online / TBA',
+          createdAt: post.createdAt,
+          time: getRelativeTime(post.createdAt),
+          participantCount: post.participantCount || 0,
+          likesCount: Array.isArray(post.likedBy) ? post.likedBy.length : 0,
+          liked: (post.likedBy || []).some((id) => String(id) === String(viewerId)),
+          commentsCount: Array.isArray(post.comments) ? post.comments.length : 0,
+        };
+      });
+    } catch {
+      postJamSessions = [];
+    }
+
+    const jamSessions = [...legacyJamSessions, ...postJamSessions].sort(
+      (first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0)
+    );
+
+    res.json({ jamSessions });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
