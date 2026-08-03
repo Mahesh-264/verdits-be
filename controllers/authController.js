@@ -852,6 +852,9 @@ exports.register = async (req, res) => {
       userData.studentProfile = {
         collegeName: trimString(req.body.collegeName),
         collegeEmail: trimString(req.body.collegeEmail),
+        specializations: [],
+        skills: [],
+        internships: [],
       };
     }
 
@@ -1267,6 +1270,9 @@ exports.googleAuth = async (req, res) => {
       userData.studentProfile = {
         collegeName: trimString(req.body.collegeName),
         collegeEmail: trimString(req.body.collegeEmail),
+        specializations: [],
+        skills: [],
+        internships: [],
       };
     }
 
