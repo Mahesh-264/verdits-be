@@ -299,21 +299,31 @@ const getLawyerName = (lawyer) => (
 
 const getTeamResponseUser = (lawyer) => User.findById(lawyer._id).select(sanitizeUser);
 
-const formatTeamCase = (teamCase) => ({
-  id: teamCase._id,
-  clientName: teamCase.clientName || '',
-  caseTitle: teamCase.caseTitle || '',
-  caseDetails: teamCase.caseDetails || '',
-  basicInfo: teamCase.basicInfo || '',
-  courtName: teamCase.courtName || '',
-  hearingDate: teamCase.hearingDate || null,
-  documents: Array.isArray(teamCase.documents) ? teamCase.documents : [],
-  status: teamCase.status || 'new',
-  addedBy: teamCase.addedBy?._id ? String(teamCase.addedBy._id) : (teamCase.addedBy ? String(teamCase.addedBy) : null),
-  addedByName: teamCase.addedByName || 'Lawyer',
-  createdAt: teamCase.createdAt,
-  updatedAt: teamCase.updatedAt,
-});
+const formatTeamCase = (teamCase) => {
+  const caseName = teamCase.caseName || teamCase.caseTitle || '';
+  const briefInfo = teamCase.briefInfo || teamCase.caseDetails || teamCase.basicInfo || '';
+  const startingDate = teamCase.startingDate || teamCase.hearingDate || null;
+  const nextHearingDate = teamCase.nextHearingDate || null;
+  return {
+    id: teamCase._id ? String(teamCase._id) : teamCase.id,
+    clientName: teamCase.clientName || '',
+    clientPhone: teamCase.clientPhone || '',
+    clientAddress: teamCase.clientAddress || '',
+    caseName,
+    caseTitle: caseName,
+    briefInfo,
+    caseDetails: briefInfo,
+    courtName: teamCase.courtName || '',
+    startingDate,
+    nextHearingDate,
+    hearingDate: startingDate,
+    status: teamCase.status || 'new',
+    addedBy: teamCase.addedBy?._id ? String(teamCase.addedBy._id) : (teamCase.addedBy ? String(teamCase.addedBy) : null),
+    addedByName: teamCase.addedByName || 'Lawyer',
+    createdAt: teamCase.createdAt,
+    updatedAt: teamCase.updatedAt,
+  };
+};
 
 const formatTeamRequest = (request) => ({
   id: request._id,
@@ -2305,34 +2315,46 @@ exports.addLawyerTeamCase = async (req, res) => {
     const team = await getTeamForMemberAction(lawyer._id, req.query.teamId || req.body.teamId);
 
     const clientName = trimString(req.body.clientName);
-    const caseTitle = trimString(req.body.caseTitle);
-    const caseDetails = trimString(req.body.caseDetails);
-    const basicInfo = trimString(req.body.basicInfo);
+    const clientPhone = trimString(req.body.clientPhone);
+    const clientAddress = trimString(req.body.clientAddress);
+    const caseName = trimString(req.body.caseName || req.body.caseTitle);
+    const briefInfo = trimString(req.body.briefInfo || req.body.caseDetails);
     const courtName = trimString(req.body.courtName);
     const status = trimString(req.body.status) || 'new';
     const allowedStatuses = ['new', 'in_progress', 'hearing_scheduled', 'closed'];
 
-    if (!clientName || !caseTitle || !caseDetails) {
-      return res.status(400).json({ message: 'Client name, case title, and case details are required' });
+    if (!clientName || !caseName || !briefInfo) {
+      return res.status(400).json({ message: 'Client name, case name, and brief info are required' });
     }
 
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({ message: 'Invalid case status' });
     }
 
-    const hearingDate = req.body.hearingDate ? new Date(req.body.hearingDate) : null;
-    if (hearingDate && Number.isNaN(hearingDate.getTime())) {
-      return res.status(400).json({ message: 'Invalid hearing date' });
+    const startingDateInput = req.body.startingDate || req.body.hearingDate;
+    const startingDate = startingDateInput ? new Date(startingDateInput) : null;
+    if (startingDate && Number.isNaN(startingDate.getTime())) {
+      return res.status(400).json({ message: 'Invalid starting date' });
+    }
+
+    const nextHearingDateInput = req.body.nextHearingDate;
+    const nextHearingDate = nextHearingDateInput ? new Date(nextHearingDateInput) : null;
+    if (nextHearingDate && Number.isNaN(nextHearingDate.getTime())) {
+      return res.status(400).json({ message: 'Invalid next hearing date' });
     }
 
     const teamCase = {
       clientName,
-      caseTitle,
-      caseDetails,
-      basicInfo,
+      clientPhone,
+      clientAddress,
+      caseName,
+      caseTitle: caseName,
+      briefInfo,
+      caseDetails: briefInfo,
       courtName,
-      hearingDate,
-      documents: parseTeamDocuments(req.body.documents),
+      startingDate,
+      nextHearingDate,
+      hearingDate: startingDate,
       status,
       addedBy: lawyer._id,
       addedByName: getLawyerName(lawyer),
@@ -2354,7 +2376,7 @@ exports.addLawyerTeamCase = async (req, res) => {
   }
 };
 
-// 17C. UPDATE TEAM CASE STATUS
+// 17C. UPDATE TEAM CASE STATUS / DETAILS
 exports.updateLawyerTeamCaseStatus = async (req, res) => {
   try {
     const lawyer = await User.findById(req.user._id);
@@ -2363,26 +2385,36 @@ exports.updateLawyerTeamCaseStatus = async (req, res) => {
       return res.status(403).json({ message: 'Only lawyers can update team cases' });
     }
 
-    const status = trimString(req.body.status);
     const allowedStatuses = ['new', 'in_progress', 'hearing_scheduled', 'closed'];
-
-    if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ message: 'Invalid case status' });
-    }
-
-    const team = await getTeamForOwnerAction(lawyer._id, req.query.teamId || req.body.teamId);
+    const team = await getTeamForMemberAction(lawyer._id, req.query.teamId || req.body.teamId);
 
     const teamCase = team.cases.id(req.params.caseId);
     if (!teamCase) {
       return res.status(404).json({ message: 'Team case not found' });
     }
 
-    teamCase.status = status;
+    if (req.body.status !== undefined) {
+      const status = trimString(req.body.status);
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ message: 'Invalid case status' });
+      }
+      teamCase.status = status;
+    }
+
+    if (req.body.nextHearingDate !== undefined) {
+      const nextHearingDateInput = req.body.nextHearingDate;
+      const nextHearingDate = nextHearingDateInput ? new Date(nextHearingDateInput) : null;
+      if (nextHearingDate && Number.isNaN(nextHearingDate.getTime())) {
+        return res.status(400).json({ message: 'Invalid next hearing date' });
+      }
+      teamCase.nextHearingDate = nextHearingDate;
+    }
+
     teamCase.updatedAt = new Date();
     await team.save();
 
     res.json({
-      message: 'Case status updated',
+      message: 'Case details updated',
       case: formatTeamCase(teamCase),
       team: formatTeamWorkspace(team, lawyer._id),
     });

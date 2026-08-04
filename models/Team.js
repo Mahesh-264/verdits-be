@@ -18,17 +18,16 @@ const teamRequestSchema = new mongoose.Schema({
 
 const teamCaseSchema = new mongoose.Schema({
   clientName: String,
+  clientPhone: String,
+  clientAddress: String,
+  caseName: String,
   caseTitle: String,
+  briefInfo: String,
   caseDetails: String,
-  basicInfo: String,
   courtName: String,
+  startingDate: Date,
+  nextHearingDate: Date,
   hearingDate: Date,
-  documents: [
-    {
-      name: String,
-      url: String,
-    },
-  ],
   status: {
     type: String,
     enum: ['new', 'in_progress', 'hearing_scheduled', 'closed'],
