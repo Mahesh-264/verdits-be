@@ -51,23 +51,33 @@ const formatMember = (member) => ({
   joinedAt: member.joinedAt,
 });
 
-const formatCase = (legalCase, documents = [], viewerId) => ({
-  id: String(legalCase._id),
-  clientId: legalCase.clientId || null,
-  clientName: legalCase.clientName || '',
-  caseTitle: legalCase.title,
-  caseDetails: legalCase.details,
-  basicInfo: legalCase.basicInfo || '',
-  courtName: legalCase.courtName || '',
-  hearingDate: legalCase.nextHearingAt || null,
-  documents: documents.map((document) => ({ id: String(document._id), name: document.name, url: document.url })),
-  status: legalCase.status,
-  addedBy: legalCase.ownerId,
-  addedByName: getDisplayName(legalCase.ownerId, 'Lawyer'),
-  canEdit: String(legalCase.ownerId?._id || legalCase.ownerId) === String(viewerId),
-  createdAt: legalCase.createdAt,
-  updatedAt: legalCase.updatedAt,
-});
+const formatCase = (legalCase, documents = [], viewerId) => {
+  const caseName = legalCase.caseName || legalCase.title || legalCase.caseTitle || '';
+  const briefInfo = legalCase.briefInfo || legalCase.details || legalCase.caseDetails || '';
+  return {
+    id: String(legalCase._id),
+    clientId: legalCase.clientId || null,
+    clientName: legalCase.clientName || '',
+    clientPhone: legalCase.clientPhone || '',
+    clientAddress: legalCase.clientAddress || '',
+    caseName,
+    caseTitle: caseName,
+    title: caseName,
+    briefInfo,
+    caseDetails: briefInfo,
+    courtName: legalCase.courtName || '',
+    startingDate: legalCase.startingDate || null,
+    nextHearingDate: legalCase.nextHearingAt || legalCase.nextHearingDate || null,
+    hearingDate: legalCase.nextHearingAt || legalCase.startingDate || null,
+    documents: documents.map((document) => ({ id: String(document._id), name: document.name, url: document.url })),
+    status: legalCase.status,
+    addedBy: legalCase.ownerId,
+    addedByName: getDisplayName(legalCase.ownerId, 'Lawyer'),
+    canEdit: String(legalCase.ownerId?._id || legalCase.ownerId) === String(viewerId),
+    createdAt: legalCase.createdAt,
+    updatedAt: legalCase.updatedAt,
+  };
+};
 
 const getWorkspace = async (userId, selectedTeamId) => {
   const memberships = await TeamMember.find({ userId, status: 'active' }).lean();

@@ -304,6 +304,16 @@ const formatTeamCase = (teamCase) => {
   const briefInfo = teamCase.briefInfo || teamCase.caseDetails || teamCase.basicInfo || '';
   const startingDate = teamCase.startingDate || teamCase.hearingDate || null;
   const nextHearingDate = teamCase.nextHearingDate || null;
+  const hearingHistory = Array.isArray(teamCase.hearingHistory)
+    ? teamCase.hearingHistory.map((item) => ({
+        id: item._id ? String(item._id) : item.id,
+        courtName: item.courtName || '',
+        hearingDate: item.hearingDate || null,
+        hearingDetails: item.hearingDetails || '',
+        nextHearing: item.nextHearing || null,
+      }))
+    : [];
+
   return {
     id: teamCase._id ? String(teamCase._id) : teamCase.id,
     clientName: teamCase.clientName || '',
@@ -317,6 +327,7 @@ const formatTeamCase = (teamCase) => {
     startingDate,
     nextHearingDate,
     hearingDate: startingDate,
+    hearingHistory,
     status: teamCase.status || 'new',
     addedBy: teamCase.addedBy?._id ? String(teamCase.addedBy._id) : (teamCase.addedBy ? String(teamCase.addedBy) : null),
     addedByName: teamCase.addedByName || 'Lawyer',
@@ -2408,6 +2419,19 @@ exports.updateLawyerTeamCaseStatus = async (req, res) => {
         return res.status(400).json({ message: 'Invalid next hearing date' });
       }
       teamCase.nextHearingDate = nextHearingDate;
+    }
+
+    if (req.body.clientPhone !== undefined) {
+      teamCase.clientPhone = trimString(req.body.clientPhone);
+    }
+
+    if (req.body.hearingHistory !== undefined && Array.isArray(req.body.hearingHistory)) {
+      teamCase.hearingHistory = req.body.hearingHistory.map((item) => ({
+        courtName: trimString(item.courtName),
+        hearingDate: item.hearingDate ? new Date(item.hearingDate) : null,
+        hearingDetails: trimString(item.hearingDetails),
+        nextHearing: item.nextHearing ? new Date(item.nextHearing) : null,
+      }));
     }
 
     teamCase.updatedAt = new Date();
