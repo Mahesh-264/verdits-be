@@ -16,6 +16,13 @@ const teamRequestSchema = new mongoose.Schema({
   requestedAt: { type: Date, default: Date.now },
 }, { _id: true });
 
+const hearingHistoryItemSchema = new mongoose.Schema({
+  courtName: { type: String, default: '' },
+  hearingDate: { type: Date, default: null },
+  hearingDetails: { type: String, default: '' },
+  nextHearing: { type: Date, default: null },
+}, { _id: true });
+
 const teamCaseSchema = new mongoose.Schema({
   clientName: String,
   clientPhone: String,
@@ -28,6 +35,7 @@ const teamCaseSchema = new mongoose.Schema({
   startingDate: Date,
   nextHearingDate: Date,
   hearingDate: Date,
+  hearingHistory: [hearingHistoryItemSchema],
   status: {
     type: String,
     enum: ['new', 'in_progress', 'hearing_scheduled', 'closed'],
