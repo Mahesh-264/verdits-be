@@ -8,6 +8,8 @@
     "start": "node server.js",
     "migrate:team-domain": "node scripts/migrateTeamDomain.js",
     "migrate:team-domain:apply": "node scripts/migrateTeamDomain.js --apply",
+    "repair:case-clients": "node scripts/repairCaseClients.js",
+    "repair:case-clients:apply": "node scripts/repairCaseClients.js --apply",
     "verify:team-domain": "node scripts/verifyTeamDomain.js",
     "verify:team-authorization": "node scripts/verifyTeamAuthorization.js",
     "test": "node --test tests/teamAuthorization.test.js"

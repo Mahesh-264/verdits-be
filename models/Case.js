@@ -3,10 +3,10 @@ const mongoose = require('mongoose');
 const caseSchema = new mongoose.Schema(
   {
     teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true, immutable: true },
-    clientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Client', default: null },
-    // Retained as a transitional display value while legacy Team cases are
-    // migrated into Team-scoped Client records.
-    clientName: { type: String, trim: true, maxlength: 200, default: '' },
+    clientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Client', required: true },
+    // Read only while repairing records created before Client was normalized.
+    // The repair migration unsets it and all new writes use clientId only.
+    clientName: { type: String, trim: true, maxlength: 200, default: undefined },
     title: { type: String, required: true, trim: true, maxlength: 300 },
     details: { type: String, required: true, trim: true, maxlength: 20000 },
     basicInfo: { type: String, trim: true, maxlength: 10000, default: '' },

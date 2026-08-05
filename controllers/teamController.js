@@ -7,11 +7,13 @@ const Client = require('../models/Client');
 const LegalCase = require('../models/Case');
 const Hearing = require('../models/Hearing');
 const CaseDocument = require('../models/CaseDocument');
+const ActivityEvent = require('../models/ActivityEvent');
 const User = require('../models/User');
 const { createNotification, getDisplayName } = require('../services/notificationService');
 const { recordActivity } = require('../services/activityService');
 const { emitTeamEvent } = require('../services/teamRealtimeService');
 const { runInTransaction } = require('../utils/transaction');
+const { normalizeName, resolveCaseClient } = require('../services/caseClientService');
 const {
   assertObjectId,
   domainError,
@@ -24,7 +26,6 @@ const {
 const trim = (value) => String(value || '').trim();
 const requestId = (req) => req.headers['x-request-id'] || '';
 const caseStatuses = new Set(['new', 'in_progress', 'hearing_scheduled', 'closed']);
-const normalizeName = (value) => trim(value).toLowerCase().replace(/\s+/g, ' ');
 const asDate = (value, label, { required = false } = {}) => {
   if (value === undefined || value === null || value === '') {
     if (required) throw domainError(400, `${label} is required`);
@@ -296,21 +297,21 @@ exports.createCase = async (req, res) => {
       let client;
       if (req.body.clientId) {
         assertObjectId(req.body.clientId, 'Client');
-        client = await Client.findOne({ _id: req.body.clientId, teamId: team._id, status: 'active' }).session(session);
+        client = await Client.findOne({ _id: req.body.clientId, teamId: team._id }).session(session);
         if (!client) throw domainError(404, 'Client not found');
       } else {
-        client = await Client.findOne({ teamId: team._id, normalizedName, phone: clientPhone, status: 'active' }).session(session);
+        client = await Client.findOne({ teamId: team._id, normalizedName, phone: clientPhone }).session(session);
         if (!client) {
           [client] = await Client.create([{ teamId: team._id, displayName: clientName, normalizedName, phone: clientPhone, address: clientAddress, createdBy: req.user._id, updatedBy: req.user._id }], { session });
         }
       }
-      const [legalCase] = await LegalCase.create([{ teamId: team._id, clientId: client._id, clientName: client.displayName, title, details, basicInfo: trim(req.body.basicInfo), courtName: trim(req.body.courtName), status, ownerId: req.user._id, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      const [legalCase] = await LegalCase.create([{ teamId: team._id, clientId: client._id, title, details, basicInfo: trim(req.body.basicInfo), courtName: trim(req.body.courtName), status, ownerId: req.user._id, createdBy: req.user._id, updatedBy: req.user._id }], { session });
       const documents = parseDocuments(req.body.documents);
       if (documents.length) await CaseDocument.insertMany(documents.map((document) => ({ teamId: team._id, caseId: legalCase._id, ...document, uploadedBy: req.user._id })), { session });
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.created', after: { title, status, clientId: client._id }, requestId: requestId(req), session });
       return { legalCase, team };
     });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(req.user._id) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(req.user._id) } });
     res.status(201).json({ message: 'Case created', case: formatCase(result.legalCase, [], req.user._id) });
   } catch (error) {
     console.error('CREATE CASE ERROR');
@@ -355,20 +356,20 @@ exports.updateCase = async (req, res) => {
         if (field === 'status' && !caseStatuses.has(value)) throw domainError(400, 'Invalid case status');
         if (String(legalCase[field] || '') !== String(value || '')) { before[field] = legalCase[field]; legalCase[field] = value; changedFields.push(field); }
       });
-      let client = null;
+      let client = null; let clientChanged = false;
       if (req.body.clientPhone !== undefined || req.body.clientAddress !== undefined) {
-        client = await Client.findOne({ _id: legalCase.clientId, teamId: team._id, status: 'active' }).session(session);
-        if (!client) throw domainError(404, 'Client not found');
+        ({ client } = await resolveCaseClient({ legalCase, actorId: req.user._id, session }));
         const clientBefore = { phone: client.phone, address: client.address };
         if (req.body.clientPhone !== undefined) client.phone = trim(req.body.clientPhone);
         if (req.body.clientAddress !== undefined) client.address = trim(req.body.clientAddress);
-        if (client.isModified('phone') || client.isModified('address')) { client.updatedBy = req.user._id; await client.save({ session }); await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'client', entityId: client._id, action: 'client.updated', changedFields: Object.keys(client.modifiedPaths()).filter((field) => ['phone', 'address'].includes(field)), before: clientBefore, after: { phone: client.phone, address: client.address }, requestId: requestId(req), session }); }
+        if (client.isModified('phone') || client.isModified('address')) { clientChanged = true; client.updatedBy = req.user._id; await client.save({ session }); await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'client', entityId: client._id, action: 'client.updated', changedFields: Object.keys(client.modifiedPaths()).filter((field) => ['phone', 'address'].includes(field)), before: clientBefore, after: { phone: client.phone, address: client.address }, requestId: requestId(req), session }); }
       }
-      if (!changedFields.length && !client) throw domainError(400, 'No editable case or client fields were supplied');
+      if (!changedFields.length && !clientChanged) throw domainError(400, 'No changes were supplied');
       if (changedFields.length) { legalCase.updatedBy = req.user._id; await legalCase.save({ session }); await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields, before, after: changedFields.reduce((data, field) => ({ ...data, [field]: legalCase[field] }), {}), requestId: requestId(req), session }); }
-      return { legalCase, team, client, changedFields };
+      return { legalCase, team, client, clientChanged, changedFields };
     });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: result.changedFields } });
+    if (result.clientChanged) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'client.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), clientId: String(result.client._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Case updated', case: formatCase(result.legalCase, [], req.user._id) });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -376,14 +377,16 @@ exports.updateCase = async (req, res) => {
 exports.deleteCase = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team');
-    const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete');
-    await runInTransaction(async (session) => {
+    const result = await runInTransaction(async (session) => {
+      const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete', { session });
       await Promise.all([LegalCase.deleteOne({ _id: legalCase._id }).session(session), Hearing.deleteMany({ caseId: legalCase._id }).session(session), CaseDocument.updateMany({ caseId: legalCase._id }, { deletedAt: new Date(), deletedBy: req.user._id }).session(session)]);
-      team.cases = (team.cases || []).filter((c) => String(c._id || c.id) !== String(legalCase._id));
-      await team.save({ session });
+      // Retain one immutable deletion audit record while removing historical
+      // events tied to a record that no longer exists.
+      await ActivityEvent.deleteMany({ caseId: legalCase._id }).session(session);
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.deleted', before: { title: legalCase.title, ownerId: legalCase.ownerId }, requestId: requestId(req), session });
+      return { legalCase, team };
     });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'case:deleted', teamId: team._id, payload: { caseId: String(legalCase._id), ownerId: String(legalCase.ownerId) } });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Case deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -391,12 +394,16 @@ exports.deleteCase = async (req, res) => {
 exports.getCaseDetails = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team');
-    const { legalCase } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'read');
-    const [caseWithClient, hearings] = await Promise.all([
-      LegalCase.findById(legalCase._id).populate('clientId', 'displayName phone address').populate('ownerId', 'firstName lastName').lean(),
-      Hearing.find({ teamId: legalCase.teamId, caseId: legalCase._id }).sort({ hearingDate: 1 }).lean(),
-    ]);
-    res.json({ case: { ...formatCase(caseWithClient, [], req.user._id), hearingHistory: hearings.map(formatHearing) } });
+    const result = await runInTransaction(async (session) => {
+      const { legalCase } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'read', { session });
+      await resolveCaseClient({ legalCase, actorId: req.user._id, session });
+      const [caseWithClient, hearings] = await Promise.all([
+        LegalCase.findById(legalCase._id).populate('clientId', 'displayName phone address').populate('ownerId', 'firstName lastName').session(session).lean(),
+        Hearing.find({ teamId: legalCase.teamId, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean(),
+      ]);
+      return { caseWithClient, hearings };
+    });
+    res.json({ case: { ...formatCase(result.caseWithClient, [], req.user._id), hearingHistory: result.hearings.map(formatHearing) } });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
@@ -467,48 +474,51 @@ exports.getNextHearings = async (req, res) => {
 exports.createHearing = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team');
-    const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write');
     const hearingDate = asDate(req.body.hearingDate ?? req.body.scheduledAt, 'Hearing date', { required: true });
     const nextHearingDate = asDate(req.body.nextHearingDate, 'Next hearing date');
-    const [hearing] = await Hearing.create([{
-      teamId: team._id, caseId: legalCase._id, hearingDate,
-      courtName: trim(req.body.courtName) || legalCase.courtName,
-      hearingDetails: trim(req.body.hearingDetails ?? req.body.notes), nextHearingDate,
-      createdBy: req.user._id, updatedBy: req.user._id,
-    }]);
-    await recomputeNextHearing(legalCase, req.user._id);
-    await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { hearingDate, nextHearingDate }, requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(legalCase, team), event: 'hearing.created', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
-    res.status(201).json({ hearing });
+    const result = await runInTransaction(async (session) => {
+      const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
+      const [hearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, hearingDate, courtName: trim(req.body.courtName) || legalCase.courtName, hearingDetails: trim(req.body.hearingDetails ?? req.body.notes), nextHearingDate, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      await recomputeNextHearing(legalCase, req.user._id, session);
+      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { hearingDate, nextHearingDate }, requestId: requestId(req), session });
+      return { hearing, legalCase, team };
+    });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    res.status(201).json({ hearing: result.hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
 exports.updateHearing = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.hearingId, 'Hearing');
-    const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write');
-    const hearing = await Hearing.findOne({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id });
-    if (!hearing) throw domainError(404, 'Hearing not found');
-    ['courtName', 'hearingDetails'].forEach((field) => { if (req.body[field] !== undefined) hearing[field] = trim(req.body[field]); });
-    if (req.body.hearingDate !== undefined || req.body.scheduledAt !== undefined) hearing.hearingDate = asDate(req.body.hearingDate ?? req.body.scheduledAt, 'Hearing date', { required: true });
-    if (req.body.nextHearingDate !== undefined) hearing.nextHearingDate = asDate(req.body.nextHearingDate, 'Next hearing date');
-    hearing.updatedBy = req.user._id; await hearing.save();
-    await recomputeNextHearing(legalCase, req.user._id);
-    await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(legalCase, team), event: 'hearing.updated', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
-    res.json({ hearing });
+    const result = await runInTransaction(async (session) => {
+      const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
+      const hearing = await Hearing.findOne({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id }).session(session);
+      if (!hearing) throw domainError(404, 'Hearing not found');
+      ['courtName', 'hearingDetails'].forEach((field) => { if (req.body[field] !== undefined) hearing[field] = trim(req.body[field]); });
+      if (req.body.hearingDate !== undefined || req.body.scheduledAt !== undefined) hearing.hearingDate = asDate(req.body.hearingDate ?? req.body.scheduledAt, 'Hearing date', { required: true });
+      if (req.body.nextHearingDate !== undefined) hearing.nextHearingDate = asDate(req.body.nextHearingDate, 'Next hearing date');
+      hearing.updatedBy = req.user._id; await hearing.save({ session }); await recomputeNextHearing(legalCase, req.user._id, session);
+      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req), session });
+      return { hearing, legalCase, team };
+    });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    res.json({ hearing: result.hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
 exports.deleteHearing = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.hearingId, 'Hearing');
-    const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete');
-    const hearing = await Hearing.findOneAndDelete({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id });
-    if (!hearing) throw domainError(404, 'Hearing not found');
-    await recomputeNextHearing(legalCase, req.user._id);
-    await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', requestId: requestId(req) });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(legalCase, team), event: 'hearing.deleted', teamId: team._id, payload: { caseId: String(legalCase._id), hearingId: String(hearing._id), ownerId: String(legalCase.ownerId) } });
+    const result = await runInTransaction(async (session) => {
+      const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete', { session });
+      const hearing = await Hearing.findOneAndDelete({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id }, { session });
+      if (!hearing) throw domainError(404, 'Hearing not found');
+      await recomputeNextHearing(legalCase, req.user._id, session);
+      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', requestId: requestId(req), session });
+      return { hearing, legalCase, team };
+    });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Hearing deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
