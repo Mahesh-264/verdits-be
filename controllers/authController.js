@@ -542,6 +542,28 @@ const uploadResumeToCloudinary = (file) => (
   })
 );
 
+const uploadProfileFileToCloudinary = (file, folder, resourceType = 'auto') => (
+  new Promise((resolve, reject) => {
+    if (!file) return resolve(null);
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: resourceType, use_filename: true, unique_filename: true },
+      (error, result) => error
+        ? reject(error)
+        : resolve({ url: result.secure_url, fileName: file.originalname })
+    );
+    streamifier.createReadStream(file.buffer).pipe(stream);
+  })
+);
+
+const parseMultipartJson = (value, fallback = {}) => {
+  if (!value || typeof value !== 'string') return value || fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
 const checkRegistrationContact = async ({ channel, value, role }) => {
   const selectedRole = normalizeRole(role) || 'user';
   if (!['user', 'lawyer', 'student'].includes(selectedRole)) {
@@ -1755,23 +1777,25 @@ exports.getLawyerById = async (req, res) => {
 // 12. UPDATE PROFILE (User & Lawyer)
 exports.updateProfile = async (req, res) => {
   try {
+    const requestBody = req.body || {};
     // Note: We use findById to ensure we get the Mongoose document instance
     const user = await User.findById(req.user._id);
 
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Update Basic Fields
-    if (req.body.firstName) user.firstName = trimString(req.body.firstName);
-    if (req.body.lastName) user.lastName = trimString(req.body.lastName);
-    if (req.body.email) user.email = trimString(req.body.email);
-    if (req.body.age) user.age = req.body.age;
-    if (req.body.gender) user.gender = req.body.gender;
+    if (requestBody.firstName) user.firstName = trimString(requestBody.firstName);
+    if (requestBody.lastName) user.lastName = trimString(requestBody.lastName);
+    if (requestBody.email) user.email = trimString(requestBody.email);
+    if (requestBody.age) user.age = requestBody.age;
+    if (requestBody.gender) user.gender = requestBody.gender;
 
     // Update Address (Merge existing with new)
-    if (req.body.address) {
+    const addressPayload = parseMultipartJson(requestBody.address, {});
+    if (addressPayload && typeof addressPayload === 'object') {
       const mergedAddress = {
         ...(user.address?.toObject ? user.address.toObject() : (user.address || {})),
-        ...req.body.address,
+        ...addressPayload,
       };
       const normalizedLocation = user.role === 'lawyer'
         ? await resolveLawyerAddress(mergedAddress, {
@@ -1783,8 +1807,8 @@ exports.updateProfile = async (req, res) => {
     }
 
     // Update Lawyer Specifics
-    if (req.body.lawyerProfile && user.role === 'lawyer') {
-      const normalizedLawyerProfile = { ...req.body.lawyerProfile };
+    if (requestBody.lawyerProfile && user.role === 'lawyer') {
+      const normalizedLawyerProfile = { ...requestBody.lawyerProfile };
 
       if (normalizedLawyerProfile.languages !== undefined) {
         normalizedLawyerProfile.languages = normalizeLanguageList(normalizedLawyerProfile.languages);
@@ -1818,11 +1842,35 @@ exports.updateProfile = async (req, res) => {
     }
 
     // Update Student Specifics
-    if (req.body.studentProfile && user.role === 'student') {
+    const studentProfilePayload = parseMultipartJson(requestBody.studentProfile, {});
+    if (studentProfilePayload && user.role === 'student') {
+      const certificateFiles = req.files?.certificateFiles || [];
+      const certificates = await Promise.all((Array.isArray(studentProfilePayload.certificates) ? studentProfilePayload.certificates : (user.studentProfile?.certificates || [])).map(async (certificate) => {
+        const fileIndex = Number(certificate.fileIndex);
+        const file = Number.isInteger(fileIndex) ? certificateFiles[fileIndex] : null;
+        const uploadedFile = file ? await uploadProfileFileToCloudinary(file, 'lawin_certificates', 'auto') : null;
+        return {
+          name: trimString(certificate.name),
+          description: trimString(certificate.description),
+          fileUrl: uploadedFile?.url || trimString(certificate.fileUrl),
+          fileName: uploadedFile?.fileName || trimString(certificate.fileName),
+        };
+      }));
       user.studentProfile = {
         ...user.studentProfile,
-        ...req.body.studentProfile,
+        ...studentProfilePayload,
+        certificates,
       };
+    }
+
+    const profileImageFile = req.files?.profileImage?.[0];
+    if (profileImageFile) {
+      if (!profileImageFile.mimetype.startsWith('image/')) {
+        return res.status(400).json({ message: 'Profile photo must be an image file' });
+      }
+      const uploadedImage = await uploadProfileFileToCloudinary(profileImageFile, 'lawin_profile_images', 'image');
+      user.profileImage = uploadedImage.url;
+      user.profilePicture = uploadedImage.url;
     }
 
     await user.save();

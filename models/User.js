@@ -171,6 +171,14 @@ const userSchema = new mongoose.Schema({
         createdAt: { type: Date, default: Date.now },
       }
     ],
+    certificates: [
+      {
+        name: String,
+        fileUrl: String,
+        fileName: String,
+        description: String,
+      }
+    ],
     jamSessions: [
       {
         title: String,
