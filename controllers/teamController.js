@@ -218,6 +218,22 @@ exports.removeMember = async (req, res) => {
       const member = await TeamMember.findOne({ teamId: team._id, userId: req.params.memberId, role: 'member', status: 'active' }).session(session);
       if (!member) throw domainError(404, 'Active Team Member not found');
       member.status = 'removed'; member.leftAt = new Date(); member.removedBy = req.user._id; member.removalReason = trim(req.body.reason); await member.save({ session });
+
+      team.members = (team.members || []).filter((m) => String(m.lawyerId || m.userId || m._id) !== String(req.params.memberId));
+      await team.save({ session });
+
+      const removedUser = await User.findById(req.params.memberId).session(session);
+      if (removedUser && removedUser.lawyerProfile) {
+        removedUser.lawyerProfile.team = {
+          teamCode: '',
+          firmName: '',
+          seniorLawyerName: '',
+          isSeniorLawyer: false,
+          joinedAt: null,
+        };
+        await removedUser.save({ session });
+      }
+
       await recordActivity({ teamId: team._id, actorId: req.user._id, entityType: 'team_member', entityId: member._id, action: 'team.member.removed', after: { userId: member.userId }, requestId: requestId(req), session });
       return { team, member };
     });
@@ -306,6 +322,8 @@ exports.deleteCase = async (req, res) => {
     const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete');
     await runInTransaction(async (session) => {
       await Promise.all([LegalCase.deleteOne({ _id: legalCase._id }).session(session), Hearing.deleteMany({ caseId: legalCase._id }).session(session), CaseDocument.updateMany({ caseId: legalCase._id }, { deletedAt: new Date(), deletedBy: req.user._id }).session(session)]);
+      team.cases = (team.cases || []).filter((c) => String(c._id || c.id) !== String(legalCase._id));
+      await team.save({ session });
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.deleted', before: { title: legalCase.title, ownerId: legalCase.ownerId }, requestId: requestId(req), session });
     });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, team.ownerId || team.owner], event: 'case:deleted', teamId: team._id, payload: { caseId: String(legalCase._id), ownerId: String(legalCase.ownerId) } });
