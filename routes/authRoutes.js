@@ -33,6 +33,19 @@ const resumeUpload = multer({
   },
 });
 
+const profileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, callback) => {
+    const allowedTypes = new Set([
+      'image/jpeg', 'image/png', 'image/webp',
+      'application/pdf', 'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ]);
+    callback(allowedTypes.has(file.mimetype) ? null : new Error('Only JPG, PNG, WEBP, PDF, DOC, and DOCX files are allowed'), allowedTypes.has(file.mimetype));
+  },
+});
+
 router.use(rejectUnsafeAuthInput);
 router.use((req, res, next) => {
   const sendJson = res.json.bind(res);
@@ -107,7 +120,10 @@ router.patch('/lawyer/internships/:postId/applicants/:applicationId/status', aut
 router.post('/follow-lawyer/:id', authController.toggleFollowLawyer);
 router.post('/connect-student/:id', authController.sendStudentConnectionRequest);
 router.post('/accept-student-request/:id', authController.acceptStudentConnectionRequest);
-router.put('/update-profile', authController.updateProfile);
+router.put('/update-profile', profileUpload.fields([
+  { name: 'profileImage', maxCount: 1 },
+  { name: 'certificateFiles', maxCount: 10 },
+]), authController.updateProfile);
 router.patch('/verify-lawyer/:id', authorize('admin'), authController.verifyLawyer);
 
 module.exports = router;
