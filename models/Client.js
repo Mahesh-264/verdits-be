@@ -17,6 +17,8 @@ const clientSchema = new mongoose.Schema(
 );
 
 clientSchema.index({ teamId: 1, normalizedName: 1 });
+// Name + phone is the team-scoped client identity used by case creation.
+clientSchema.index({ teamId: 1, normalizedName: 1, phone: 1 }, { unique: true });
 clientSchema.index({ teamId: 1, status: 1, updatedAt: -1 });
 
 module.exports = mongoose.model('Client', clientSchema);
