@@ -39,6 +39,16 @@ const getCaseReadScope = ({ teamId, userId, membership }) => (
     : { teamId, ownerId: userId }
 );
 
+// All Team Case readers must start from this scope so owners see their team's
+// cases and members see only their own. Additional visibility rules are added
+// here instead of being reimplemented in individual endpoints.
+const getAuthorizedTeamCaseScope = ({ teamId, userId, membership, includeClosed = true, includeArchived = true }) => {
+  const scope = getCaseReadScope({ teamId, userId, membership });
+  if (!includeClosed) scope.status = { $ne: 'closed' };
+  if (!includeArchived) scope.archivedAt = null;
+  return scope;
+};
+
 const requireCaseAccess = async (caseId, teamId, userId, action = 'read', options = {}) => {
   assertObjectId(caseId, 'Case');
   const { team, membership } = await requireActiveMembership(teamId, userId, options);
@@ -62,6 +72,7 @@ module.exports = {
   domainError,
   getActiveMembership,
   getCaseReadScope,
+  getAuthorizedTeamCaseScope,
   requireActiveMembership,
   requireCaseAccess,
   requireTeamOwner,

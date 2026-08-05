@@ -10,6 +10,8 @@
     "migrate:team-domain:apply": "node scripts/migrateTeamDomain.js --apply",
     "repair:case-clients": "node scripts/repairCaseClients.js",
     "repair:case-clients:apply": "node scripts/repairCaseClients.js --apply",
+    "repair:hearings": "node scripts/repairHearings.js",
+    "repair:hearings:apply": "node scripts/repairHearings.js --apply",
     "verify:team-domain": "node scripts/verifyTeamDomain.js",
     "verify:team-authorization": "node scripts/verifyTeamAuthorization.js",
     "test": "node --test tests/teamAuthorization.test.js"

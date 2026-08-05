@@ -17,7 +17,7 @@ const { normalizeName, resolveCaseClient } = require('../services/caseClientServ
 const {
   assertObjectId,
   domainError,
-  getCaseReadScope,
+  getAuthorizedTeamCaseScope,
   requireActiveMembership,
   requireCaseAccess,
   requireTeamOwner,
@@ -25,6 +25,18 @@ const {
 
 const trim = (value) => String(value || '').trim();
 const requestId = (req) => req.headers['x-request-id'] || '';
+const optionalRequestReason = (body) => {
+  if (body === undefined) return '';
+  if (!body || Array.isArray(body) || typeof body !== 'object') {
+    throw domainError(400, 'Request payload must be an object');
+  }
+  return trim(body.reason);
+};
+const teamActionErrorResponse = (res, error) => res.status(error.statusCode || 500).json({
+  success: false,
+  message: error.message || 'Unable to update join request',
+  error: { code: error.statusCode ? 'TEAM_JOIN_REQUEST_INVALID' : 'TEAM_JOIN_REQUEST_UPDATE_FAILED' },
+});
 const caseStatuses = new Set(['new', 'in_progress', 'hearing_scheduled', 'closed']);
 const asDate = (value, label, { required = false } = {}) => {
   if (value === undefined || value === null || value === '') {
@@ -49,8 +61,13 @@ const formatHearing = (hearing) => ({
 });
 
 const recomputeNextHearing = async (legalCase, userId, session) => {
-  const query = Hearing.findOne({ teamId: legalCase.teamId, caseId: legalCase._id, nextHearingDate: { $ne: null } })
-    .sort({ nextHearingDate: -1 })
+  const query = Hearing.findOne({
+    teamId: legalCase.teamId,
+    caseId: legalCase._id,
+    hearingDate: { $exists: true, $ne: null },
+    nextHearingDate: { $exists: true, $ne: null },
+  })
+    .sort({ nextHearingDate: 1, _id: 1 })
     .select('nextHearingDate');
   if (session) query.session(session);
   const latest = await query.lean();
@@ -133,7 +150,7 @@ const getWorkspace = async (userId, selectedTeamId) => {
       ? TeamJoinRequest.find({ teamId: activeTeam._id, status: 'pending' })
         .populate('requesterId', 'firstName lastName email phone').sort({ requestedAt: -1 }).lean()
       : [],
-    LegalCase.find(getCaseReadScope({ teamId: activeTeam._id, userId, membership: activeMembership }))
+    LegalCase.find(getAuthorizedTeamCaseScope({ teamId: activeTeam._id, userId, membership: activeMembership, includeArchived: false }))
       .populate('ownerId', 'firstName lastName phone')
       .populate('clientId', 'displayName phone address')
       .sort({ updatedAt: -1 }).limit(100).lean(),
@@ -227,6 +244,9 @@ exports.decideJoinRequest = async (req, res) => {
     assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.requestId, 'Join request');
     const approved = req.params.decision === 'approve';
     if (!approved && req.params.decision !== 'reject') throw domainError(400, 'Invalid join request decision');
+    // Approval has no reason by design. Rejection may include one, but it is
+    // optional so an omitted JSON body is a valid request.
+    const decisionReason = approved ? '' : optionalRequestReason(req.body);
     const result = await runInTransaction(async (session) => {
       const { team } = await requireTeamOwner(req.params.teamId, req.user._id, { session });
       const joinRequest = await TeamJoinRequest.findOne({ _id: req.params.requestId, teamId: team._id, status: 'pending' }).session(session);
@@ -236,29 +256,36 @@ exports.decideJoinRequest = async (req, res) => {
         if (activeCount >= team.maxTeamSize) throw domainError(409, 'This team is already full');
         await TeamMember.findOneAndUpdate({ teamId: team._id, userId: joinRequest.requesterId }, { $set: { role: 'member', status: 'active', joinedAt: new Date(), leftAt: null, addedBy: req.user._id, removedBy: null, removalReason: '' } }, { upsert: true, new: true, session, setDefaultsOnInsert: true });
       }
-      joinRequest.status = approved ? 'approved' : 'rejected'; joinRequest.decidedAt = new Date(); joinRequest.decidedBy = req.user._id; joinRequest.decisionReason = trim(req.body.reason); await joinRequest.save({ session });
+      joinRequest.status = approved ? 'approved' : 'rejected'; joinRequest.decidedAt = new Date(); joinRequest.decidedBy = req.user._id; joinRequest.decisionReason = decisionReason; await joinRequest.save({ session });
       await recordActivity({ teamId: team._id, actorId: req.user._id, entityType: 'team_join_request', entityId: joinRequest._id, action: approved ? 'team.join_request.approved' : 'team.join_request.rejected', after: { requesterId: joinRequest.requesterId }, requestId: requestId(req), session });
       return { team, joinRequest };
     });
     const type = approved ? 'team_join_accepted' : 'team_join_rejected';
     await createNotification({ recipient: result.joinRequest.requesterId, actor: req.user._id, type, title: approved ? 'Team request accepted' : 'Team request rejected', message: `${getDisplayName(req.user)} ${approved ? 'accepted' : 'rejected'} your request to join ${result.team.firmName}.`, link: `/lawyer-dash?section=team&teamId=${result.team._id}`, metadata: { teamId: result.team._id }, io: req.app.get('socketio') });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, result.joinRequest.requesterId], event: approved ? 'team:member-joined' : 'team:join-request-rejected', teamId: result.team._id, payload: { userId: String(result.joinRequest.requesterId) } });
-    res.json({ message: approved ? 'Join request approved' : 'Join request rejected', ...(await getWorkspace(req.user._id, result.team._id)) });
-  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+    res.json({
+      success: true,
+      message: approved ? 'Join request approved' : 'Join request rejected',
+      data: await getWorkspace(req.user._id, result.team._id),
+    });
+  } catch (error) { teamActionErrorResponse(res, error); }
 };
 
 exports.removeMember = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.memberId, 'Member');
+    // A removal reason is optional. A body-less DELETE is valid.
+    const removalReason = optionalRequestReason(req.body);
     const result = await runInTransaction(async (session) => {
       const { team } = await requireTeamOwner(req.params.teamId, req.user._id, { session });
       if (String(team.ownerId || team.owner) === String(req.params.memberId)) throw domainError(400, 'The Team Owner cannot be removed');
       const member = await TeamMember.findOne({ teamId: team._id, userId: req.params.memberId, role: 'member', status: 'active' }).session(session);
       if (!member) throw domainError(404, 'Active Team Member not found');
-      member.status = 'removed'; member.leftAt = new Date(); member.removedBy = req.user._id; member.removalReason = trim(req.body.reason); await member.save({ session });
+      member.status = 'removed'; member.leftAt = new Date(); member.removedBy = req.user._id; member.removalReason = removalReason; await member.save({ session });
 
-      team.members = (team.members || []).filter((m) => String(m.lawyerId || m.userId || m._id) !== String(req.params.memberId));
-      await team.save({ session });
+      // TeamMember is the normalized source of truth. `team` is deliberately
+      // a lean authorization result, and legacy embedded members must not be
+      // written by this route.
 
       const removedUser = await User.findById(req.params.memberId).session(session);
       if (removedUser && removedUser.lawyerProfile) {
@@ -277,8 +304,12 @@ exports.removeMember = async (req, res) => {
     });
     await createNotification({ recipient: result.member.userId, actor: req.user._id, type: 'team_member_removed', title: 'Removed from team', message: `${getDisplayName(req.user)} removed you from ${result.team.firmName}.`, link: '/lawyer-dash?section=team', metadata: { teamId: result.team._id }, io: req.app.get('socketio') });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, result.member.userId], event: 'team:member-left', teamId: result.team._id, payload: { userId: String(result.member.userId) } });
-    res.json({ message: 'Team Member removed', ...(await getWorkspace(req.user._id, result.team._id)) });
-  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+    res.json({
+      success: true,
+      message: 'Team Member removed',
+      data: await getWorkspace(req.user._id, result.team._id),
+    });
+  } catch (error) { teamActionErrorResponse(res, error); }
 };
 
 exports.createCase = async (req, res) => {
@@ -369,6 +400,9 @@ exports.updateCase = async (req, res) => {
       return { legalCase, team, client, clientChanged, changedFields };
     });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: result.changedFields } });
+    if (result.changedFields.includes('status')) {
+      emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.status.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), status: result.legalCase.status } });
+    }
     if (result.clientChanged) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'client.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), clientId: String(result.client._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Case updated', case: formatCase(result.legalCase, [], req.user._id) });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
@@ -465,9 +499,37 @@ exports.getNextHearings = async (req, res) => {
     assertObjectId(req.params.teamId, 'Team');
     const { team, membership } = await requireActiveMembership(req.params.teamId, req.user._id);
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
-    const legalCases = await LegalCase.find({ ...getCaseReadScope({ teamId: team._id, userId: req.user._id, membership }), nextHearingAt: { $ne: null } })
-      .populate('clientId', 'displayName phone address').sort({ nextHearingAt: 1 }).limit(limit).lean();
-    res.json({ cases: legalCases.map((legalCase) => ({ ...formatCase(legalCase, [], req.user._id), teamName: team.firmName, teamCode: team.teamCode })), page: 1, limit });
+    const caseScope = getAuthorizedTeamCaseScope({
+      teamId: team._id,
+      userId: req.user._id,
+      membership,
+      includeClosed: false,
+      includeArchived: false,
+    });
+    const legalCases = await LegalCase.find(caseScope)
+      .populate('clientId', 'displayName phone address').lean();
+    const caseIds = legalCases.map((legalCase) => legalCase._id);
+    const hearings = caseIds.length
+      ? await Hearing.find({
+        teamId: team._id,
+        caseId: { $in: caseIds },
+        hearingDate: { $exists: true, $ne: null },
+        nextHearingDate: { $exists: true, $ne: null },
+      }).sort({ nextHearingDate: 1, _id: 1 }).lean()
+      : [];
+    // A case can have historical hearings. Retain only its nearest qualifying
+    // one so every eligible case has exactly one Next Hearings card.
+    const nextHearingByCaseId = new Map();
+    hearings.forEach((hearing) => {
+      const caseId = String(hearing.caseId);
+      if (!nextHearingByCaseId.has(caseId)) nextHearingByCaseId.set(caseId, hearing);
+    });
+    const eligibleCases = legalCases
+      .filter((legalCase) => nextHearingByCaseId.has(String(legalCase._id)))
+      .map((legalCase) => ({ ...legalCase, nextHearingAt: nextHearingByCaseId.get(String(legalCase._id)).nextHearingDate }))
+      .sort((left, right) => new Date(left.nextHearingAt) - new Date(right.nextHearingAt))
+      .slice(0, limit);
+    res.json({ cases: eligibleCases.map((legalCase) => ({ ...formatCase(legalCase, [], req.user._id), teamName: team.firmName, teamCode: team.teamCode })), page: 1, limit });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 

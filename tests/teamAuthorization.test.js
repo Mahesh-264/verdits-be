@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const TeamMember = require('../models/TeamMember');
-const { getCaseReadScope } = require('../services/teamAuthorizationService');
+const { getCaseReadScope, getAuthorizedTeamCaseScope } = require('../services/teamAuthorizationService');
 
 test('Team Owner case scope includes every case in their team', () => {
   const teamId = new mongoose.Types.ObjectId();
@@ -19,6 +19,21 @@ test('Team Member case scope is permanently limited to their own cases', () => {
   assert.deepEqual(
     getCaseReadScope({ teamId, userId: memberId, membership: { role: 'member' } }),
     { teamId, ownerId: memberId }
+  );
+});
+
+test('Next Hearings scope excludes closed and archived cases without widening member access', () => {
+  const teamId = new mongoose.Types.ObjectId();
+  const memberId = new mongoose.Types.ObjectId();
+  assert.deepEqual(
+    getAuthorizedTeamCaseScope({
+      teamId,
+      userId: memberId,
+      membership: { role: 'member' },
+      includeClosed: false,
+      includeArchived: false,
+    }),
+    { teamId, ownerId: memberId, status: { $ne: 'closed' }, archivedAt: null }
   );
 });
 
