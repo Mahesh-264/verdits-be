@@ -1944,9 +1944,31 @@ exports.getLawyerStudentInteractions = async (req, res) => {
         })),
       }));
 
+    const followerUsers = await User.find({
+      $or: [
+        { _id: { $in: lawyer.followers || [] } },
+        { 'studentProfile.followingLawyers': lawyer._id },
+      ],
+      role: 'student',
+    }).select('firstName lastName email phone profileImage profilePicture studentProfile createdAt').lean();
+
+    const followers = followerUsers.map((student) => ({
+      id: String(student._id),
+      _id: String(student._id),
+      name: `${student.firstName || ''} ${student.lastName || ''}`.trim() || 'Law Student',
+      email: student.email || '',
+      phone: student.phone || '',
+      profileImage: student.profileImage || student.profilePicture || '',
+      collegeName: student.studentProfile?.collegeName || 'Law Student',
+      collegeEmail: student.studentProfile?.collegeEmail || '',
+      currentYear: student.studentProfile?.currentYear || '',
+      followedAt: student.createdAt,
+    }));
+
     res.json({
       internships,
       jamSessions,
+      followers,
       stats: getLawyerInteractionStats(lawyer),
     });
   } catch (error) {
