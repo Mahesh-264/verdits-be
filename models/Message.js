@@ -20,15 +20,24 @@ const MessageSchema = new mongoose.Schema({
   // 🟢 FIX 2: Added 'video' so Cloudinary video uploads don't crash the DB
   messageType: {
     type: String,
-    enum: ['text', 'image', 'audio', 'video'], 
+    enum: ['text', 'image', 'audio', 'video', 'document'], 
     default: 'text'
   },
   content: { 
     type: String, 
     required: function() { return this.messageType === 'text'; } 
   },
-  mediaUrl: String,      // Cloudinary URL
-  mediaPublicId: String, // For Cloudinary deletions
+  // Kept for backwards compatibility with existing chat messages.
+  mediaUrl: String,
+  mediaPublicId: String,
+  attachment: {
+    url: { type: String, trim: true },
+    publicId: { type: String, trim: true },
+    resourceType: { type: String, enum: ['image', 'video', 'raw'] },
+    mimeType: { type: String, trim: true },
+    originalName: { type: String, trim: true },
+    size: { type: Number, min: 0 },
+  },
   timestamp: { type: Date, default: Date.now },
   read: { type: Boolean, default: false },
 });

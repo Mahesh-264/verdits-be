@@ -14,7 +14,7 @@
     "repair:hearings:apply": "node scripts/repairHearings.js --apply",
     "verify:team-domain": "node scripts/verifyTeamDomain.js",
     "verify:team-authorization": "node scripts/verifyTeamAuthorization.js",
-    "test": "node --test tests/teamAuthorization.test.js"
+    "test": "node --test tests/teamAuthorization.test.js tests/chatUpload.test.js"
   },
   "keywords": [],
   "author": "",

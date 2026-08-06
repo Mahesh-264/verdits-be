@@ -1,24 +1,95 @@
 const Message = require("../models/Message");
 const User = require("../models/User");
 const cloudinary = require("../config/cloudinary");
-const streamifier = require("streamifier");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { randomUUID } = require("crypto");
 const mongoose = require("mongoose");
 const { createNotification, getDisplayName } = require("../services/notificationService");
 
 // --- Helper: Cloudinary Upload ---
-const uploadToCloudinary = (buffer, messageType) => {
-  return new Promise((resolve, reject) => {
-    const resourceType = (messageType === 'audio' || messageType === 'video') ? 'video' : 'image';
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: "legal_chat_media", resource_type: resourceType },
-      (err, result) => {
-        if (result) resolve({ url: result.secure_url, publicId: result.public_id });
-        else reject(err);
-      }
-    );
-    streamifier.createReadStream(buffer).pipe(stream);
-  });
+const getUploadDetails = (file) => {
+  if (file.mimetype.startsWith('image/')) return { messageType: 'image', resourceType: 'image' };
+  if (file.mimetype.startsWith('audio/')) return { messageType: 'audio', resourceType: 'video' };
+  if (file.mimetype.startsWith('video/')) return { messageType: 'video', resourceType: 'video' };
+  return { messageType: 'document', resourceType: 'raw' };
 };
+
+const getStoredResourceType = (message) => (
+  message.attachment?.resourceType
+  || (message.messageType === 'audio' || message.messageType === 'video' ? 'video' : 'image')
+);
+
+// Exported for the upload regression test; routes only use the controller actions below.
+exports.getUploadDetails = getUploadDetails;
+
+const fallbackExtensions = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'application/pdf': '.pdf',
+  'application/msword': '.doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+  'text/plain': '.txt',
+  'audio/mpeg': '.mp3',
+  'audio/wav': '.wav',
+  'audio/ogg': '.ogg',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+};
+
+const getFileExtension = (file) => (
+  path.extname(path.basename(file.originalname || '')).toLowerCase()
+  || fallbackExtensions[file.mimetype]
+  || ''
+);
+
+exports.getFileExtension = getFileExtension;
+
+const uploadToCloudinary = async (file) => {
+  const { resourceType } = getUploadDetails(file);
+  const originalName = path.basename(file.originalname || `attachment${getFileExtension(file)}`);
+  const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'lawin-chat-'));
+  const tempFilePath = path.join(tempDirectory, `${randomUUID()}${getFileExtension(file)}`);
+
+  try {
+    // upload_stream receives only bytes, so Cloudinary cannot reliably retain a
+    // raw file's extension/format. upload() receives an extension-bearing file.
+    await fs.writeFile(tempFilePath, file.buffer);
+    const result = await cloudinary.uploader.upload(tempFilePath, {
+      folder: "legal_chat_media",
+      resource_type: resourceType,
+      use_filename: true,
+      unique_filename: true,
+      filename_override: originalName,
+    });
+
+    if (!result) throw new Error('Cloudinary did not return an upload result.');
+
+    console.log({
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      resource_type: result.resource_type,
+      secure_url: result.secure_url,
+      format: result.format,
+    });
+
+    return {
+      url: result.secure_url,
+      publicId: result.public_id,
+      resourceType: result.resource_type,
+      mimeType: file.mimetype,
+      originalName: file.originalname,
+      size: file.size,
+    };
+  } finally {
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  }
+};
+
+exports.uploadToCloudinary = uploadToCloudinary;
 
 // 🟢 1. SEND MESSAGE
 exports.sendMessage = async (req, res) => {
@@ -34,9 +105,13 @@ exports.sendMessage = async (req, res) => {
     };
 
     if (req.file) {
-      const { url, publicId } = await uploadToCloudinary(req.file.buffer, newMessageData.messageType);
-      newMessageData.mediaUrl = url;
-      newMessageData.mediaPublicId = publicId;
+      const uploadResult = await uploadToCloudinary(req.file);
+      // File metadata is the source of truth; never let a client messageType
+      // force a PDF onto Cloudinary's image delivery endpoint.
+      newMessageData.messageType = getUploadDetails(req.file).messageType;
+      newMessageData.mediaUrl = uploadResult.url;
+      newMessageData.mediaPublicId = uploadResult.publicId;
+      newMessageData.attachment = uploadResult;
     }
 
     const message = await Message.create(newMessageData);
@@ -154,8 +229,7 @@ exports.deleteMessage = async (req, res) => {
     }
 
     if (message.mediaPublicId) {
-      const type = (message.messageType === 'audio' || message.messageType === 'video') ? 'video' : 'image';
-      await cloudinary.uploader.destroy(message.mediaPublicId, { resource_type: type });
+      await cloudinary.uploader.destroy(message.mediaPublicId, { resource_type: getStoredResourceType(message) });
     }
 
     await Message.findByIdAndDelete(req.params.id);
@@ -184,8 +258,7 @@ exports.deleteBatch = async (req, res) => {
     const cloudinaryDeletions = messages
       .filter(m => m.mediaPublicId)
       .map(m => {
-        const type = (m.messageType === 'audio' || m.messageType === 'video') ? 'video' : 'image';
-        return cloudinary.uploader.destroy(m.mediaPublicId, { resource_type: type });
+        return cloudinary.uploader.destroy(m.mediaPublicId, { resource_type: getStoredResourceType(m) });
       });
     
     await Promise.all(cloudinaryDeletions);

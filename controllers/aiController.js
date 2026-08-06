@@ -14,7 +14,7 @@ const VALID_CATEGORIES = [
 const FALLBACK_REPLY =
   "I'm having trouble understanding your request right now. Please try again or consult a lawyer directly.";
 const NON_LEGAL_REPLY =
-  "I can only help with legal questions. Please ask about a legal issue such as contracts, property, family matters, criminal law, cyber fraud, employment, or court procedures.";
+  "I can help with questions related to law, including legal sections, Acts, rights, contracts, property, family matters, criminal law, cyber fraud, employment, and court procedures.";
 
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 const AI_MAX_RETRIES = 1;
@@ -63,7 +63,7 @@ const normalizeCategory = (category = "") => {
 const isLegalRelatedQuery = (text = "") => {
   const msg = String(text).toLowerCase();
 
-  return /(law|legal|lawyer|advocate|attorney|court|judge|case|petition|notice|agreement|contract|clause|rights|liability|sue|lawsuit|complaint|fir|police|arrest|bail|crime|criminal|theft|assault|cheating|forgery|property|land|tenant|rent|lease|eviction|divorce|marriage|custody|maintenance|alimony|domestic violence|company|business|startup|shareholder|director|compliance|employment|employee|employer|salary|termination|wages|labour|labor|harassment|cyber|fraud|scam|phishing|upi|otp|data privacy|will|inheritance|consumer|trademark|copyright|patent|tax|gst|document|deed|affidavit|notary|legal notice|dispute|settlement|appeal|tribunal|arbitration|mediation)/i.test(
+  return /(law|legal|lawyer|advocate|attorney|court|judge|case|petition|notice|agreement|contract|clause|rights|liability|sue|lawsuit|complaint|fir|police|arrest|bail|crime|criminal|theft|assault|cheating|forgery|property|land|tenant|rent|lease|eviction|divorce|marriage|custody|maintenance|alimony|domestic violence|company|business|startup|shareholder|director|compliance|employment|employee|employer|salary|termination|wages|labour|labor|harassment|cyber|fraud|scam|phishing|upi|otp|data privacy|will|inheritance|consumer|trademark|copyright|patent|tax|gst|document|deed|affidavit|notary|legal notice|dispute|settlement|appeal|tribunal|arbitration|mediation|section\s*\d+|section|act\b|code\b|article\s*\d*|constitution|statute|bare act|penal code|procedure code|ipc|bns|bnss|crpc|cpc)/i.test(
     msg
   );
 };
@@ -158,7 +158,7 @@ const buildPrompt = (message) => `
 You are Lawin AI, a legal assistant for an Indian legal platform.
 
 Your job:
-1. Answer only legal questions.
+1. Answer all questions related to law, including questions about legal sections, Acts, codes, statutes, rights, and court procedures.
 2. Give a short, simple, practical answer in plain English.
 3. Classify the issue into exactly one category:
 criminal, property, family, corporate, cyber, employment, other
