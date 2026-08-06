@@ -82,6 +82,7 @@ const uploadToCloudinary = async (file) => {
       resourceType: result.resource_type,
       mimeType: file.mimetype,
       originalName: file.originalname,
+      size: file.size,
     };
   } finally {
     await fs.rm(tempDirectory, { recursive: true, force: true });

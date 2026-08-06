@@ -36,6 +36,7 @@ const MessageSchema = new mongoose.Schema({
     resourceType: { type: String, enum: ['image', 'video', 'raw'] },
     mimeType: { type: String, trim: true },
     originalName: { type: String, trim: true },
+    size: { type: Number, min: 0 },
   },
   timestamp: { type: Date, default: Date.now },
   read: { type: Boolean, default: false },
