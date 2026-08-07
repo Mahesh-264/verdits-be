@@ -14,6 +14,7 @@ const { recordActivity } = require('../services/activityService');
 const { emitTeamEvent } = require('../services/teamRealtimeService');
 const { runInTransaction } = require('../utils/transaction');
 const { normalizeName, resolveCaseClient } = require('../services/caseClientService');
+const { createHearingCalendarEvent, updateHearingCalendarEvent, deleteHearingCalendarEvent } = require('../services/hearingCalendarService');
 const {
   assertObjectId,
   domainError,
@@ -448,6 +449,7 @@ exports.syncHearingHistory = async (req, res) => {
     const events = [];
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
+      const calendarEvents = [];
       const existing = await Hearing.find({ teamId: team._id, caseId: legalCase._id }).session(session);
       const byId = new Map(existing.map((hearing) => [String(hearing._id), hearing]));
       const seenIds = new Set();
@@ -468,29 +470,44 @@ exports.syncHearingHistory = async (req, res) => {
           hearing.updatedBy = req.user._id;
           await hearing.save({ session });
           await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', changedFields: ['courtName', 'hearingDate', 'hearingDetails', 'nextHearingDate'], before, after: hearing.toObject(), requestId: requestId(req), session });
-          events.push({ event: 'hearing.updated', hearingId: hearing._id });
+          const event = { event: 'hearing.updated', hearingId: hearing._id, hearing };
+          events.push(event); calendarEvents.push(event);
         } else {
           const [hearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, courtName: trim(row.courtName) || legalCase.courtName, hearingDate, hearingDetails: trim(row.hearingDetails), nextHearingDate, createdBy: req.user._id, updatedBy: req.user._id }], { session });
           await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: hearing.toObject(), requestId: requestId(req), session });
-          events.push({ event: 'hearing.created', hearingId: hearing._id });
+          const event = { event: 'hearing.created', hearingId: hearing._id, hearing };
+          events.push(event); calendarEvents.push(event);
         }
       }
       for (const hearing of existing) if (!seenIds.has(String(hearing._id))) {
         await Hearing.deleteOne({ _id: hearing._id }).session(session);
         await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', before: hearing.toObject(), requestId: requestId(req), session });
-        events.push({ event: 'hearing.deleted', hearingId: hearing._id });
+        const event = { event: 'hearing.deleted', hearingId: hearing._id, hearing };
+        events.push(event); calendarEvents.push(event);
       }
       const previousNextHearingAt = legalCase.nextHearingAt;
       const nextHearingAt = await recomputeNextHearing(legalCase, req.user._id, session);
       if (String(previousNextHearingAt || '') !== String(nextHearingAt || '')) {
         await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields: ['nextHearingAt'], before: { nextHearingAt: previousNextHearingAt }, after: { nextHearingAt }, requestId: requestId(req), session });
       }
+<<<<<<< HEAD
       const [caseWithClient, hearings] = await Promise.all([
         LegalCase.findById(legalCase._id).populate('clientId', 'displayName phone address').populate('ownerId', 'firstName lastName').session(session).lean(),
         Hearing.find({ teamId: team._id, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean(),
       ]);
       return { legalCase: caseWithClient, team, hearings };
     });
+=======
+      const hearings = await Hearing.find({ teamId: team._id, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean();
+      return { legalCase, team, hearings, calendarEvents };
+    });
+    for (const event of result.calendarEvents) {
+      if (event.event === 'hearing.created') await createHearingCalendarEvent(event.hearing, result.legalCase);
+      if (event.event === 'hearing.updated') await updateHearingCalendarEvent(event.hearing, result.legalCase);
+      if (event.event === 'hearing.deleted') await deleteHearingCalendarEvent(event.hearing);
+    }
+    events.forEach(({ event, hearingId }) => emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event, teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(hearingId), ownerId: String(result.legalCase.ownerId) } }));
+>>>>>>> 35df88783fb2139e5734eadd774cbcd2bced0fdb
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: ['nextHearingAt'] } });
     res.json({ message: 'Hearing history saved', case: { ...formatCase(result.legalCase, [], req.user._id), hearingHistory: result.hearings.map(formatHearing) } });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
@@ -547,6 +564,7 @@ exports.createHearing = async (req, res) => {
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { hearingDate, nextHearingDate }, requestId: requestId(req), session });
       return { hearing, legalCase, team };
     });
+    await createHearingCalendarEvent(result.hearing, result.legalCase);
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.status(201).json({ hearing: result.hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
@@ -566,6 +584,7 @@ exports.updateHearing = async (req, res) => {
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req), session });
       return { hearing, legalCase, team };
     });
+    await updateHearingCalendarEvent(result.hearing, result.legalCase);
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ hearing: result.hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
@@ -582,6 +601,7 @@ exports.deleteHearing = async (req, res) => {
       await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', requestId: requestId(req), session });
       return { hearing, legalCase, team };
     });
+    await deleteHearingCalendarEvent(result.hearing);
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Hearing deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }

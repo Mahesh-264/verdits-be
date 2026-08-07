@@ -8,6 +8,7 @@ const hearingSchema = new mongoose.Schema(
     courtName: { type: String, trim: true, maxlength: 300, default: '' },
     hearingDetails: { type: String, trim: true, maxlength: 10000, default: '' },
     nextHearingDate: { type: Date, default: null },
+    googleEventId: { type: String, default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },
