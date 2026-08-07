@@ -196,6 +196,7 @@ app.use('/api/chat', require('./routes/chatRoutes'));
 app.use('/api/appointments', require('./routes/appointmentRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/api/teams', require('./routes/teamRoutes'));
+app.use('/api/calendar', require('./routes/calendarRoutes'));
 
 app.use((err, req, res, next) => {
     console.error("❌ SERVER CRASH PREVENTED ❌");

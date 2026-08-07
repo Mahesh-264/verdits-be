@@ -54,6 +54,13 @@ const userSchema = new mongoose.Schema({
     },
   },
   refreshToken: String,
+  googleCalendar: {
+    connected: { type: Boolean, default: false },
+    email: { type: String, trim: true, lowercase: true },
+    // This token is server-side only. It is intentionally never returned by
+    // the calendar status endpoint or included in any client payload.
+    refreshToken: { type: String, select: false },
+  },
   otp: { type: String, select: false },
   otpExpires: { type: Date, select: false },
   resetOtpHash: { type: String, select: false },
