@@ -111,8 +111,8 @@ const formatCase = (legalCase, documents = [], viewerId) => {
     id: String(legalCase._id),
     clientId: client?._id || legalCase.clientId || null,
     clientName: client?.displayName || legalCase.clientName || '',
-    clientPhone: client?.phone || '',
-    clientAddress: client?.address || '',
+    clientPhone: client?.phone || legalCase.clientPhone || '',
+    clientAddress: client?.address || legalCase.clientAddress || '',
     caseName,
     caseTitle: caseName,
     title: caseName,
@@ -485,10 +485,12 @@ exports.syncHearingHistory = async (req, res) => {
       if (String(previousNextHearingAt || '') !== String(nextHearingAt || '')) {
         await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields: ['nextHearingAt'], before: { nextHearingAt: previousNextHearingAt }, after: { nextHearingAt }, requestId: requestId(req), session });
       }
-      const hearings = await Hearing.find({ teamId: team._id, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean();
-      return { legalCase, team, hearings };
+      const [caseWithClient, hearings] = await Promise.all([
+        LegalCase.findById(legalCase._id).populate('clientId', 'displayName phone address').populate('ownerId', 'firstName lastName').session(session).lean(),
+        Hearing.find({ teamId: team._id, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean(),
+      ]);
+      return { legalCase: caseWithClient, team, hearings };
     });
-    events.forEach(({ event, hearingId }) => emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event, teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(hearingId), ownerId: String(result.legalCase.ownerId) } }));
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: ['nextHearingAt'] } });
     res.json({ message: 'Hearing history saved', case: { ...formatCase(result.legalCase, [], req.user._id), hearingHistory: result.hearings.map(formatHearing) } });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
