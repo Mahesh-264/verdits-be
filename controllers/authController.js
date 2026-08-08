@@ -3185,17 +3185,69 @@ exports.updateInternshipApplicantStatus = async (req, res) => {
   }
 };
 
+// 17G. GET INTERNSHIP APPLICANTS
+exports.getInternshipApplicants = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can view internship applicants' });
+    }
+
+    const internship = (lawyer.lawyerProfile?.internships || []).find(
+      (item) => String(item._id) === String(req.params.postId)
+    );
+
+    if (!internship) {
+      return res.status(404).json({ message: 'Internship not found' });
+    }
+
+    const applicants = (internship.applications || []).map((application) => ({
+      id: application._id,
+      studentId: application.studentId,
+      name: `${application.firstName || ''} ${application.lastName || ''}`.trim() || 'Student',
+      email: application.email || '',
+      phone: application.phone || '',
+      collegeName: application.collegeName || '',
+      degree: application.degree || '',
+      yearOfStudy: application.yearOfStudy || '',
+      skills: application.skills || [],
+      resumeLink: application.resumeLink || '',
+      resumeUrl: application.resumeUrl || '',
+      resumeFileName: application.resumeFileName || '',
+      coverMessage: application.coverMessage || '',
+      linkedIn: application.linkedIn || '',
+      portfolio: application.portfolio || '',
+      status: application.status || 'pending',
+      submittedAt: application.submittedAt,
+    }));
+
+    res.json(applicants);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // 16. GET ALL PUBLISHED INTERNSHIPS
 exports.getPublishedInternships = async (req, res) => {
   try {
     const viewerId = getOptionalViewerId(req);
+    const viewer = viewerId
+      ? await User.findById(viewerId).select('role studentProfile.internshipApplications')
+      : null;
+    const appliedInternshipIds = viewer?.role === 'student'
+      ? getStudentApplicationIds(viewer)
+      : new Set();
     const lawyers = await User.find({ role: 'lawyer', 'lawyerProfile.internships.0': { $exists: true } })
       .select(sanitizeUser)
       .sort({ createdAt: -1 });
 
     const legacyInternships = lawyers.flatMap((lawyer) =>
       (lawyer.lawyerProfile?.internships || []).map((internship) =>
-        formatPublishedInternship(lawyer, internship, { viewerId })
+        ({
+          ...formatPublishedInternship(lawyer, internship, { viewerId }),
+          applied: appliedInternshipIds.has(String(internship._id)),
+        })
       )
     );
 

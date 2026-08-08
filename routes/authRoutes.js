@@ -116,6 +116,7 @@ router.post('/lawyer/internships/:postId/like', authorize('student', 'lawyer'), 
 router.post('/lawyer/internships/:postId/comments', authorize('student', 'lawyer'), authController.addInternshipComment);
 router.patch('/lawyer/internships/:postId/toggle-status', authorize('lawyer'), authController.toggleInternshipStatus);
 router.delete('/lawyer/internships/:postId', authorize('lawyer'), authController.deleteLawyerInternship);
+router.get('/lawyer/internships/:postId/applicants', authorize('lawyer'), authController.getInternshipApplicants);
 router.patch('/lawyer/internships/:postId/applicants/:applicationId/status', authorize('lawyer'), authController.updateInternshipApplicantStatus);
 router.post('/follow-lawyer/:id', authController.toggleFollowLawyer);
 router.post('/connect-student/:id', authController.sendStudentConnectionRequest);
