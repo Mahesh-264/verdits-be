@@ -18,5 +18,6 @@ router.get('/feed', authorize('student', 'lawyer'), postsController.getFeed);
 router.get('/user/:id', authorize('student', 'lawyer'), postsController.getUserPosts);
 router.post('/:id/like', authorize('student', 'lawyer'), postsController.toggleLike);
 router.post('/:id/comments', authorize('student', 'lawyer'), postsController.addComment);
+router.delete('/:id', authorize('student', 'lawyer'), postsController.deletePost);
 
 module.exports = router;
