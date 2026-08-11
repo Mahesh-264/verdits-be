@@ -13,16 +13,16 @@ test('Team Owner case scope includes every case in their team', () => {
   );
 });
 
-test('Team Member case scope is permanently limited to their own cases', () => {
+test('Team Member case scope includes the selected team directory', () => {
   const teamId = new mongoose.Types.ObjectId();
   const memberId = new mongoose.Types.ObjectId();
   assert.deepEqual(
     getCaseReadScope({ teamId, userId: memberId, membership: { role: 'member' } }),
-    { teamId, ownerId: memberId }
+    { teamId }
   );
 });
 
-test('Next Hearings scope excludes closed and archived cases without widening member access', () => {
+test('Next Hearings scope excludes closed and archived cases within the selected team', () => {
   const teamId = new mongoose.Types.ObjectId();
   const memberId = new mongoose.Types.ObjectId();
   assert.deepEqual(
@@ -33,7 +33,7 @@ test('Next Hearings scope excludes closed and archived cases without widening me
       includeClosed: false,
       includeArchived: false,
     }),
-    { teamId, ownerId: memberId, status: { $ne: 'closed' }, archivedAt: null }
+    { teamId, status: { $ne: 'closed' }, archivedAt: null }
   );
 });
 

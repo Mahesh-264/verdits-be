@@ -300,8 +300,12 @@ exports.removeMember = async (req, res) => {
     // A removal reason is optional. A body-less DELETE is valid.
     const removalReason = optionalRequestReason(req.body);
     const result = await runInTransaction(async (session) => {
-      const { team } = await requireTeamOwner(req.params.teamId, req.user._id, { session });
-      if (String(team.ownerId || team.owner) === String(req.params.memberId)) throw domainError(400, 'The Team Owner cannot be removed');
+      const isSelfLeave = String(req.params.memberId) === String(req.user._id);
+      const context = isSelfLeave
+        ? await requireActiveMembership(req.params.teamId, req.user._id, { session })
+        : await requireTeamOwner(req.params.teamId, req.user._id, { session });
+      const { team } = context;
+      if (String(team.ownerId || team.owner) === String(req.params.memberId)) throw domainError(400, 'The Team Owner cannot leave or be removed');
       const member = await TeamMember.findOne({ teamId: team._id, userId: req.params.memberId, role: 'member', status: 'active' }).session(session);
       if (!member) throw domainError(404, 'Active Team Member not found');
       member.status = 'removed'; member.leftAt = new Date(); member.removedBy = req.user._id; member.removalReason = removalReason; await member.save({ session });
@@ -322,15 +326,15 @@ exports.removeMember = async (req, res) => {
         await removedUser.save({ session });
       }
 
-      await recordActivity({ teamId: team._id, actorId: req.user._id, entityType: 'team_member', entityId: member._id, action: 'team.member.removed', after: { userId: member.userId }, requestId: requestId(req), session });
-      return { team, member };
+      await recordActivity({ teamId: team._id, actorId: req.user._id, entityType: 'team_member', entityId: member._id, action: isSelfLeave ? 'team.member.left' : 'team.member.removed', after: { userId: member.userId }, requestId: requestId(req), session });
+      return { team, member, isSelfLeave };
     });
-    await createNotification({ recipient: result.member.userId, actor: req.user._id, type: 'team_member_removed', title: 'Removed from team', message: `${getDisplayName(req.user)} removed you from ${result.team.firmName}.`, link: '/lawyer-dash?section=team', metadata: { teamId: result.team._id }, io: req.app.get('socketio') });
+    if (!result.isSelfLeave) await createNotification({ recipient: result.member.userId, actor: req.user._id, type: 'team_member_removed', title: 'Removed from team', message: `${getDisplayName(req.user)} removed you from ${result.team.firmName}.`, link: '/lawyer-dash?section=team', metadata: { teamId: result.team._id }, io: req.app.get('socketio') });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id, result.member.userId], event: 'team:member-left', teamId: result.team._id, payload: { userId: String(result.member.userId) } });
     res.json({
       success: true,
-      message: 'Team Member removed',
-      data: await getWorkspace(req.user._id, result.team._id),
+      message: result.isSelfLeave ? 'You left the team' : 'Team Member removed',
+      data: await getWorkspace(req.user._id),
     });
   } catch (error) { teamActionErrorResponse(res, error); }
 };
