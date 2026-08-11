@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { generateConsentUrl, decodeState, exchangeCode, getGoogleAccountEmail } = require('../services/googleCalendarService');
+const { resyncFutureActiveHearings } = require('../services/hearingCalendarService');
 
 const frontendUrl = () => (process.env.FRONTEND_URL || process.env.CORS_ORIGIN || 'http://localhost:5173').split(',')[0].trim().replace(/\/$/, '');
 const redirectToHearings = (res, status) => res.redirect(`${frontendUrl()}/lawyer-dashboard?calendar=${status}`);
@@ -46,6 +47,7 @@ exports.callbackGoogleCalendar = async (req, res) => {
     if (!user || user.role !== 'lawyer') throw new Error('Google Calendar user is unavailable');
     user.googleCalendar = { connected: true, email, refreshToken: tokens.refresh_token };
     await user.save();
+    await resyncFutureActiveHearings(user._id);
     console.log('Google Calendar Connected', { userId: String(user._id), email });
     return redirectToHearings(res, 'connected');
   } catch (error) {

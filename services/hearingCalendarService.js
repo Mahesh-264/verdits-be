@@ -1,5 +1,7 @@
 const User = require('../models/User');
 const Client = require('../models/Client');
+const Hearing = require('../models/Hearing');
+const LegalCase = require('../models/Case');
 const {
   hearingEventResource,
   createCalendarEvent,
@@ -15,6 +17,10 @@ const eventResourceFor = async (hearing, legalCase) => {
     legalCase.clientId ? Client.findById(legalCase.clientId).lean() : null,
   ]);
   if (!lawyer?.googleCalendar?.connected || !lawyer.googleCalendar.refreshToken) return null;
+  if (hearing.hearingTime === '') {
+    console.warn('Google Calendar event skipped because hearing time is empty', { hearingId: String(hearing._id) });
+    return null;
+  }
   return { lawyer, resource: hearingEventResource({ hearing, legalCase, client, lawyer }) };
 };
 
@@ -33,6 +39,10 @@ const createHearingCalendarEvent = async (hearing, legalCase) => {
 
 const updateHearingCalendarEvent = async (hearing, legalCase) => {
   if (!hearing.googleEventId) return;
+  if (hearing.hearingTime === '') {
+    console.log('Calendar Event Removed Because Hearing Time Was Cleared', { hearingId: String(hearing._id) });
+    return deleteHearingCalendarEvent(hearing);
+  }
   try {
     const data = await eventResourceFor(hearing, legalCase);
     if (!data) return;
@@ -51,8 +61,33 @@ const deleteHearingCalendarEvent = async (hearing) => {
     await deleteCalendarEvent(lawyer.googleCalendar.refreshToken, hearing.googleEventId);
     console.log('Calendar Event Deleted', { hearingId: String(hearing._id), eventId: hearing.googleEventId });
   } catch (error) {
+    if (error.code === 404) {
+      console.log('Calendar Event Already Deleted', { hearingId: String(hearing._id), eventId: hearing.googleEventId });
+      return;
+    }
     console.error('Google Calendar event deletion failed:', error.message);
   }
 };
 
-module.exports = { createHearingCalendarEvent, updateHearingCalendarEvent, deleteHearingCalendarEvent };
+const deleteCalendarEventsForCase = async (hearings) => {
+  const eventHearings = hearings.filter((hearing) => hearing.googleEventId);
+  await Promise.all(eventHearings.map((hearing) => deleteHearingCalendarEvent(hearing)));
+  console.log('Case Calendar Events Cleanup Attempted', { hearingCount: eventHearings.length });
+};
+
+const resyncFutureActiveHearings = async (userId) => {
+  try {
+    const hearings = await Hearing.find({ createdBy: userId, nextHearingDate: null, isHistorical: { $ne: true }, hearingDate: { $gte: new Date() } });
+    for (const hearing of hearings) {
+      const legalCase = await LegalCase.findById(hearing.caseId);
+      if (!legalCase) continue;
+      if (hearing.googleEventId) await updateHearingCalendarEvent(hearing, legalCase);
+      else await createHearingCalendarEvent(hearing, legalCase);
+    }
+    console.log('Google Calendar Resync Completed', { userId: String(userId), hearingCount: hearings.length });
+  } catch (error) {
+    console.error('Google Calendar resync failed:', error.message);
+  }
+};
+
+module.exports = { createHearingCalendarEvent, updateHearingCalendarEvent, deleteHearingCalendarEvent, deleteCalendarEventsForCase, resyncFutureActiveHearings };

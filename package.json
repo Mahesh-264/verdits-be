@@ -12,6 +12,8 @@
     "repair:case-clients:apply": "node scripts/repairCaseClients.js --apply",
     "repair:hearings": "node scripts/repairHearings.js",
     "repair:hearings:apply": "node scripts/repairHearings.js --apply",
+    "migrate:legacy-hearings": "node scripts/migrateLegacyHearings.js",
+    "migrate:legacy-hearings:apply": "node scripts/migrateLegacyHearings.js --apply",
     "verify:team-domain": "node scripts/verifyTeamDomain.js",
     "verify:team-authorization": "node scripts/verifyTeamAuthorization.js",
     "test": "node --test tests/teamAuthorization.test.js tests/chatUpload.test.js"

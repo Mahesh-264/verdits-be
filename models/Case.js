@@ -11,6 +11,7 @@ const caseSchema = new mongoose.Schema(
     details: { type: String, required: true, trim: true, maxlength: 20000 },
     basicInfo: { type: String, trim: true, maxlength: 10000, default: '' },
     courtName: { type: String, trim: true, maxlength: 300, default: '' },
+    startingDate: { type: Date, default: null },
     status: {
       type: String,
       enum: ['new', 'in_progress', 'hearing_scheduled', 'closed'],
