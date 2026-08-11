@@ -24,7 +24,7 @@ const userSchema = new mongoose.Schema({
   phoneVerified: { type: Boolean, default: true },
   accountStatus: {
     type: String,
-    enum: ['active', 'pending_approval', 'suspended', 'blocked', 'deleted'],
+    enum: ['active', 'pending_approval', 'rejected', 'suspended', 'blocked', 'deleted'],
     default: 'active',
   },
   profilePicture: { type: String, default: '' },

@@ -60,6 +60,12 @@ const createUserFromPending = async (pending) => {
     googleId: pending.googleId,
   });
 
+  const isLawyer = pending.role === 'lawyer';
+  const initialAccountStatus = isLawyer ? 'pending_approval' : 'active';
+  const updatedLawyerProfile = isLawyer && pending.lawyerProfile
+    ? { ...pending.lawyerProfile, isVerified: false }
+    : pending.lawyerProfile;
+
   const user = new User({
     firstName: pending.firstName,
     lastName: pending.lastName,
@@ -72,11 +78,12 @@ const createUserFromPending = async (pending) => {
     verified: true,
     emailVerified: true,
     phoneVerified: true,
+    accountStatus: initialAccountStatus,
     profilePicture: pending.profilePicture,
     profileImage: pending.profilePicture,
     address: pending.address,
     location: pending.location,
-    lawyerProfile: pending.lawyerProfile,
+    lawyerProfile: updatedLawyerProfile,
     studentProfile: pending.studentProfile,
   });
 

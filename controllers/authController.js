@@ -987,7 +987,12 @@ exports.login = async (req, res) => {
     if (accountStatus === 'blocked') throw authError(AUTH_CODES.ACCOUNT_BLOCKED, 'This account has been blocked.', { status: 403 });
     if (accountStatus === 'suspended') throw authError(AUTH_CODES.ACCOUNT_SUSPENDED, 'This account has been suspended.', { status: 403 });
     if (accountStatus === 'deleted') throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
-    if (accountStatus === 'pending_approval') throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your account is pending administrator approval.', { status: 403 });
+
+    // For non-lawyer roles, block pending approval at login endpoint
+    if (authenticatedUser.role !== 'lawyer' && accountStatus === 'pending_approval') {
+      throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your account is pending administrator approval.', { status: 403 });
+    }
+
     if (authenticatedUser.emailVerified === false || authenticatedUser.verified === false) throw authError(AUTH_CODES.EMAIL_NOT_VERIFIED, 'Please verify your email address before logging in.', { status: 403, field: 'email' });
     if (authenticatedUser.phoneVerified === false) throw authError(AUTH_CODES.PHONE_NOT_VERIFIED, 'Please verify your phone number before logging in.', { status: 403, field: 'phone' });
     if (!authenticatedUser.password || !(await authenticatedUser.matchPassword(password))) throw authError(AUTH_CODES.WRONG_PASSWORD, 'Incorrect password.', { status: 401, field: 'password' });
@@ -3378,4 +3383,140 @@ exports.verifyLawyer = async (req, res) => {
     console.log(`👮 Lawyer ${user.phone} verification set to ${req.body.isVerified}`);
     res.json(user);
   } catch (error) { res.status(500).json({ message: error.message }); }
+};
+
+// 19. ADMIN - GET ALL LAWYERS FOR VERIFICATION
+exports.getAdminLawyers = async (req, res) => {
+  try {
+    const { status } = req.query;
+    let filter = { role: 'lawyer' };
+
+    if (status === 'pending') {
+      filter.$or = [
+        { accountStatus: 'pending_approval' },
+        { accountStatus: { $exists: false }, 'lawyerProfile.isVerified': false },
+      ];
+    } else if (status === 'approved') {
+      filter.accountStatus = 'active';
+    } else if (status === 'rejected') {
+      filter.accountStatus = 'rejected';
+    }
+
+    const lawyers = await User.find(filter)
+      .select('firstName lastName email phone accountStatus lawyerProfile verified emailVerified phoneVerified createdAt updatedAt')
+      .sort({ createdAt: -1 });
+
+    const formattedLawyers = lawyers.map((lawyer) => ({
+      _id: lawyer._id,
+      id: lawyer._id,
+      name: lawyer.name || `${lawyer.firstName || ''} ${lawyer.lastName || ''}`.trim(),
+      firstName: lawyer.firstName,
+      lastName: lawyer.lastName,
+      email: lawyer.email,
+      phone: lawyer.phone,
+      accountStatus: lawyer.accountStatus || 'active',
+      barId: lawyer.lawyerProfile?.barId || '',
+      barEnrollmentNumber: lawyer.lawyerProfile?.barId || '',
+      specialization: lawyer.lawyerProfile?.specialization || '',
+      experienceYears: lawyer.lawyerProfile?.experienceYears || 0,
+      isVerified: Boolean(lawyer.lawyerProfile?.isVerified),
+      createdAt: lawyer.createdAt,
+      updatedAt: lawyer.updatedAt,
+      lawyerProfile: lawyer.lawyerProfile,
+    }));
+
+    res.json({ lawyers: formattedLawyers, count: formattedLawyers.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 20. ADMIN - UPDATE LAWYER STATUS (APPROVE / REJECT / PENDING)
+exports.updateLawyerStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body; // 'approved' | 'rejected' | 'pending' | 'active' | 'pending_approval'
+
+    const targetUser = await User.findById(id);
+    if (!targetUser || targetUser.role !== 'lawyer') {
+      return res.status(404).json({ message: 'Lawyer user not found' });
+    }
+
+    let nextAccountStatus = 'active';
+    let isVerified = true;
+
+    if (status === 'rejected') {
+      console.log(`👮 Deleting rejected lawyer account from database: ${targetUser.email || targetUser.phone} (${id})`);
+      await User.deleteOne({ _id: id });
+      return res.json({
+        success: true,
+        message: 'Lawyer application rejected and record removed from database.',
+        deleted: true,
+        lawyerId: id,
+      });
+    }
+
+    if (status === 'approved' || status === 'active') {
+      nextAccountStatus = 'active';
+      isVerified = true;
+    } else if (status === 'pending' || status === 'pending_approval') {
+      nextAccountStatus = 'pending_approval';
+      isVerified = false;
+    } else {
+      return res.status(400).json({ message: 'Invalid status provided' });
+    }
+
+    targetUser.accountStatus = nextAccountStatus;
+    if (!targetUser.lawyerProfile) targetUser.lawyerProfile = {};
+    targetUser.lawyerProfile.isVerified = isVerified;
+
+    try {
+      await targetUser.save();
+    } catch (saveErr) {
+      if (saveErr.name === 'ValidationError') {
+        console.warn('⚠️ Mongoose validation error on save, performing direct updateOne:', saveErr.message);
+        await User.updateOne(
+          { _id: id },
+          { $set: { accountStatus: nextAccountStatus, 'lawyerProfile.isVerified': isVerified } }
+        );
+      } else {
+        throw saveErr;
+      }
+    }
+
+    await createNotification({
+      recipient: targetUser._id,
+      type: 'system',
+      title: isVerified ? 'Lawyer Account Approved' : 'Lawyer Account Status Updated',
+      message: isVerified
+        ? 'Congratulations! Your lawyer profile and enrollment number have been verified by the administrator. You can now log in to your dashboard.'
+        : nextAccountStatus === 'rejected'
+          ? 'Your lawyer account registration application was not approved.'
+          : 'Your verification status has been updated by the administrator.',
+      link: '/lawyer-profile/me',
+      io: req.app.get('socketio'),
+    });
+
+    console.log(`👮 Lawyer ${targetUser.email || targetUser.phone} status set to ${nextAccountStatus}`);
+
+    res.json({
+      message: `Lawyer status updated to ${nextAccountStatus}`,
+      lawyer: {
+        _id: targetUser._id,
+        id: targetUser._id,
+        name: targetUser.name || `${targetUser.firstName || ''} ${targetUser.lastName || ''}`.trim(),
+        firstName: targetUser.firstName,
+        lastName: targetUser.lastName,
+        email: targetUser.email,
+        phone: targetUser.phone,
+        accountStatus: targetUser.accountStatus,
+        barId: targetUser.lawyerProfile?.barId || '',
+        barEnrollmentNumber: targetUser.lawyerProfile?.barId || '',
+        specialization: targetUser.lawyerProfile?.specialization || '',
+        isVerified: targetUser.lawyerProfile?.isVerified,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };

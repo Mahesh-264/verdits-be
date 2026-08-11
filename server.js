@@ -14,19 +14,20 @@ const cors = require('cors');
 const morgan = require('morgan');
 const connectDB = require('./config/db');
 const { createNotification, getDisplayName } = require('./services/notificationService');
+const seedAdminUser = require('./services/adminSeedService');
 const TeamMember = require('./models/TeamMember');
 const User = require('./models/User');
 
 const app = express();
 const server = http.createServer(app); 
-const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,https://bluxurywebsite.onrender.com')
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,https://bluxurywebsite.onrender.com')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
 const corsOptions = {
     origin(origin, callback) {
         // Non-browser clients do not send Origin; browser origins must be explicit.
-        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') return callback(null, true);
         return callback(new Error('Origin is not allowed by CORS'));
     },
     credentials: true,
@@ -214,7 +215,8 @@ server.on('error', (error) => {
     console.error('Server failed to start:', error);
     process.exit(1);
 });
-connectDB().then(() => {
+connectDB().then(async () => {
+    await seedAdminUser();
     server.listen(PORT, () => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📡 Socket.io engine ready for Real-time Chat`);

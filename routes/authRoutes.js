@@ -126,5 +126,7 @@ router.put('/update-profile', profileUpload.fields([
   { name: 'certificateFiles', maxCount: 10 },
 ]), authController.updateProfile);
 router.patch('/verify-lawyer/:id', authorize('admin'), authController.verifyLawyer);
+router.get('/admin/lawyers', authorize('admin'), authController.getAdminLawyers);
+router.patch('/admin/lawyers/:id/status', authorize('admin'), authController.updateLawyerStatus);
 
 module.exports = router;
