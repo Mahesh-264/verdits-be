@@ -33,15 +33,14 @@ const requireTeamOwner = async (teamId, userId, options = {}) => {
   return context;
 };
 
-const getCaseReadScope = ({ teamId, userId, membership }) => (
-  membership.role === 'owner'
-    ? { teamId }
-    : { teamId, ownerId: userId }
-);
+// A team workspace is organized around each lawyer's own cases. Any active
+// member may read the team's case directory, while write/delete permissions
+// remain limited to the lawyer who created the case below.
+const getCaseReadScope = ({ teamId }) => ({ teamId });
 
-// All Team Case readers must start from this scope so owners see their team's
-// cases and members see only their own. Additional visibility rules are added
-// here instead of being reimplemented in individual endpoints.
+// All Team Case readers must start from this scope so a selected team's
+// directory is consistent for owners and joined members. Additional visibility
+// rules are added here instead of being reimplemented in individual endpoints.
 const getAuthorizedTeamCaseScope = ({ teamId, userId, membership, includeClosed = true, includeArchived = true }) => {
   const scope = getCaseReadScope({ teamId, userId, membership });
   if (!includeClosed) scope.status = { $ne: 'closed' };
@@ -58,7 +57,7 @@ const requireCaseAccess = async (caseId, teamId, userId, action = 'read', option
   if (!legalCase) throw domainError(404, 'Case not found');
 
   const isCaseOwner = String(legalCase.ownerId) === String(userId);
-  const mayRead = isCaseOwner || membership.role === 'owner';
+  const mayRead = Boolean(membership);
   if (!mayRead) throw domainError(403, 'You do not have access to this case');
   if (action !== 'read' && !isCaseOwner) {
     throw domainError(403, 'Only the case owner can modify or delete this case');
