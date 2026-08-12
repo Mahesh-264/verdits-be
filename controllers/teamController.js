@@ -116,14 +116,26 @@ const parseDocuments = (value) => {
   }).filter((item) => item.name && item.url);
 };
 
-const formatMember = (member) => ({
+const formatMember = (member, options = {}) => ({
   id: String(member._id),
   lawyerId: member.userId?._id || member.userId,
   name: getDisplayName(member.userId, 'Lawyer'),
   email: member.userId?.email || '',
   phone: member.userId?.phone || '',
   role: member.role,
+  hasTeam: Boolean(options.hasTeam),
   joinedAt: member.joinedAt,
+});
+
+const formatLegacyTeamMember = (member, options = {}) => ({
+  id: String(member._id || member.lawyerId),
+  lawyerId: member.lawyerId,
+  name: trim(member.name) || 'Lawyer',
+  email: member.email || '',
+  phone: member.phone || '',
+  role: options.role || 'member',
+  hasTeam: Boolean(options.hasTeam),
+  joinedAt: member.joinedAt || null,
 });
 
 const formatCase = (legalCase, documents = [], viewerId) => {
@@ -220,7 +232,20 @@ const getWorkspace = async (userId, selectedTeamId) => {
     map.set(key, [...(map.get(key) || []), document]);
     return map;
   }, new Map());
-  const members = memberRecords.filter((member) => member.role === 'member').map(formatMember);
+  const memberUserIds = memberRecords
+    .filter((member) => member.role === 'member')
+    .map((member) => member.userId?._id || member.userId)
+    .filter(Boolean);
+  const teamsOwnedByMembers = memberUserIds.length
+    ? await Team.find({
+      status: 'active',
+      $or: [{ ownerId: { $in: memberUserIds } }, { owner: { $in: memberUserIds } }],
+    }).select('ownerId owner').lean()
+    : [];
+  const memberTeamOwnerIds = new Set(teamsOwnedByMembers.map((team) => String(team.ownerId || team.owner)));
+  const members = memberRecords
+    .filter((member) => member.role === 'member')
+    .map((member) => formatMember(member, { hasTeam: memberTeamOwnerIds.has(String(member.userId?._id || member.userId)) }));
   const workspace = {
     id: String(activeTeam._id),
     role: activeMembership.role,
@@ -249,6 +274,124 @@ const getWorkspace = async (userId, selectedTeamId) => {
 exports.getWorkspace = async (req, res) => {
   try { res.json(await getWorkspace(req.user._id, req.query.teamId)); }
   catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+// A team owner may view the team created by a lawyer who is currently a
+// member of their team. This is deliberately scoped to that relationship so
+// arbitrary lawyer/team directories cannot be queried.
+exports.getMemberOwnedTeam = async (req, res) => {
+  try {
+    assertObjectId(req.params.teamId, 'Team');
+    assertObjectId(req.params.memberId, 'Team Member');
+    await requireTeamOwner(req.params.teamId, req.user._id);
+
+    const queue = [req.params.teamId];
+    const visitedTeams = new Set();
+    let member = null;
+    while (queue.length && !member) {
+      const teamId = queue.shift();
+      if (visitedTeams.has(String(teamId))) continue;
+      visitedTeams.add(String(teamId));
+      const records = await TeamMember.find({ teamId, status: 'active' }).lean();
+      member = records.find((record) => String(record.userId) === String(req.params.memberId) && record.role === 'member');
+      const directMemberIds = records
+        .filter((record) => record.role === 'member')
+        .map((record) => record.userId)
+        .filter(Boolean);
+      if (directMemberIds.length) {
+        const childTeams = await Team.find({
+          status: 'active',
+          $or: [{ ownerId: { $in: directMemberIds } }, { owner: { $in: directMemberIds } }],
+        }).select('_id').lean();
+        childTeams.forEach((team) => queue.push(team._id));
+      }
+    }
+    if (!member) throw domainError(404, 'Active Team Member not found');
+
+    const ownedTeam = await Team.findOne({
+      status: 'active',
+      $or: [{ ownerId: req.params.memberId }, { owner: req.params.memberId }],
+    }).sort({ updatedAt: -1 }).lean();
+
+    const memberCases = await LegalCase.find({ ownerId: req.params.memberId, archivedAt: null })
+      .populate('clientId', 'displayName phone address').sort({ updatedAt: -1 }).limit(100).lean();
+    if (!ownedTeam) return res.json({ lawyer: { id: String(req.params.memberId) }, cases: memberCases.map((legalCase) => formatCase(legalCase, [], req.user._id)), team: null });
+
+    const [members, legalCases] = await Promise.all([
+      TeamMember.find({ teamId: ownedTeam._id, status: 'active' })
+        .populate('userId', 'firstName lastName email phone profileImage role')
+        .sort({ role: 1, joinedAt: 1 }).lean(),
+      LegalCase.find({ teamId: ownedTeam._id, archivedAt: null })
+        .populate('ownerId', 'firstName lastName phone')
+        .populate('clientId', 'displayName phone address')
+        .sort({ updatedAt: -1 }).limit(100).lean(),
+    ]);
+
+    const legacyMembers = Array.isArray(ownedTeam.members) ? ownedTeam.members : [];
+    const ownedTeamMemberIds = [
+      ...members
+        .filter((record) => record.role === 'member')
+        .map((record) => record.userId?._id || record.userId),
+      ...legacyMembers.map((record) => record.lawyerId),
+    ].filter(Boolean);
+
+    const ownerUserId = ownedTeam.ownerId || ownedTeam.owner;
+    const ownerUser = ownerUserId ? await User.findById(ownerUserId).select('firstName lastName email phone').lean() : null;
+    const formattedMembers = [];
+    const seenLawyerIds = new Set();
+    const addFormattedMember = (record) => {
+      const lawyerId = record.lawyerId || record.userId?._id || record.userId;
+      if (!lawyerId || seenLawyerIds.has(String(lawyerId))) return;
+      seenLawyerIds.add(String(lawyerId));
+      formattedMembers.push(record);
+    };
+
+    if (ownerUserId) {
+      addFormattedMember({
+        id: `owner-${String(ownerUserId)}`,
+        lawyerId: ownerUserId,
+        name: getDisplayName(ownerUser, 'Team Owner'),
+        email: ownerUser?.email || '',
+        phone: ownerUser?.phone || '',
+        role: 'owner',
+        hasTeam: true,
+        joinedAt: ownedTeam.createdAt || null,
+      });
+    }
+
+    members
+      .filter((record) => record.role === 'member')
+      .forEach((record) => addFormattedMember(formatMember(record)));
+
+    const nestedOwnedTeams = ownedTeamMemberIds.length
+      ? await Team.find({
+        status: 'active',
+        $or: [{ ownerId: { $in: ownedTeamMemberIds } }, { owner: { $in: ownedTeamMemberIds } }],
+      }).select('ownerId owner').lean()
+      : [];
+    const nestedTeamOwnerIds = new Set(nestedOwnedTeams.map((team) => String(team.ownerId || team.owner)));
+
+    legacyMembers.forEach((record) => {
+      addFormattedMember(formatLegacyTeamMember(record, { hasTeam: nestedTeamOwnerIds.has(String(record.lawyerId)) }));
+    });
+    formattedMembers.forEach((record) => {
+      if (record.role === 'member') record.hasTeam = nestedTeamOwnerIds.has(String(record.lawyerId));
+    });
+
+    return res.json({
+      team: {
+        id: String(ownedTeam._id),
+        firmName: ownedTeam.firmName,
+        seniorLawyerName: ownedTeam.seniorLawyerName,
+        members: formattedMembers,
+        cases: legalCases.map((legalCase) => formatCase(legalCase, [], req.user._id)),
+      },
+      lawyer: { id: String(req.params.memberId) },
+      cases: memberCases.map((legalCase) => formatCase(legalCase, [], req.user._id)),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ message: error.message });
+  }
 };
 
 exports.createTeam = async (req, res) => {
