@@ -6,6 +6,7 @@ const router = express.Router();
 router.use(protect, authorize('lawyer'));
 
 router.get('/workspace', teamController.getWorkspace);
+router.get('/next-hearings', teamController.getMyNextHearings);
 router.post('/', teamController.createTeam);
 router.post('/join-requests', teamController.requestToJoin);
 router.patch('/:teamId/join-requests/:requestId/:decision', teamController.decideJoinRequest);

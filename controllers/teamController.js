@@ -155,6 +155,39 @@ const formatCase = (legalCase, documents = [], viewerId) => {
   };
 };
 
+const formatLegacyEmbeddedCase = (legacyCase, team, viewerId) => {
+  const caseName = legacyCase.caseName || legacyCase.caseTitle || 'Untitled Case';
+  const briefInfo = legacyCase.briefInfo || legacyCase.caseDetails || '';
+  const hearingDate = legacyCase.hearingDate || null;
+  return {
+    id: String(legacyCase._id),
+    clientId: null,
+    clientName: legacyCase.clientName || '',
+    clientPhone: legacyCase.clientPhone || '',
+    clientAddress: legacyCase.clientAddress || '',
+    caseName,
+    caseTitle: caseName,
+    title: caseName,
+    briefInfo,
+    caseDetails: briefInfo,
+    courtName: legacyCase.courtName || '',
+    startingDate: legacyCase.startingDate || legacyCase.createdAt || null,
+    nextHearingDate: hearingDate,
+    hearingDate,
+    hearingTime: hearingDate ? dateTimeParts(hearingDate).time : '',
+    documents: [],
+    status: legacyCase.status,
+    addedBy: legacyCase.addedBy || null,
+    addedByName: legacyCase.addedByName || 'Lawyer',
+    canEdit: String(legacyCase.addedBy?._id || legacyCase.addedBy || '') === String(viewerId),
+    createdAt: legacyCase.createdAt,
+    updatedAt: legacyCase.updatedAt,
+    teamId: team?._id ? String(team._id) : '',
+    teamName: team?.firmName || 'No team',
+    teamCode: team?.teamCode || 'Not added',
+  };
+};
+
 const getWorkspace = async (userId, selectedTeamId) => {
   const memberships = await TeamMember.find({ userId, status: 'active' }).lean();
   const teamIds = memberships.map((member) => member.teamId);
@@ -589,6 +622,115 @@ exports.getNextHearings = async (req, res) => {
       .sort((left, right) => new Date(left.activeHearing.hearingDate) - new Date(right.activeHearing.hearingDate))
       .slice(0, limit);
     res.json({ cases: eligibleCases.map((legalCase) => ({ ...formatCase(legalCase, [], req.user._id), hearingDate: legalCase.activeHearing.hearingDate, hearingTime: dateTimeParts(legalCase.activeHearing.hearingDate).time, courtName: legalCase.activeHearing.courtName || legalCase.courtName, teamName: team.firmName, teamCode: team.teamCode })), page: 1, limit });
+  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+// Dashboard scope: all active memberships, but only cases owned by the
+// authenticated lawyer. This is deliberately not tied to the My Team switcher.
+exports.getMyNextHearings = async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
+    const now = new Date();
+    // Next Hearings is based solely on case ownership. Team membership and
+    // selected workspace must never constrain this dashboard query. Support
+    // both current and legacy ownership fields so older cases still appear.
+    const [legalCases, legacyTeams] = await Promise.all([
+      LegalCase.find({
+        $and: [
+          {
+            $or: [
+              { ownerId: req.user._id },
+              { createdBy: req.user._id },
+              { addedBy: req.user._id },
+            ],
+          },
+          { status: { $ne: 'closed' } },
+          { archivedAt: null },
+        ],
+      })
+        .populate('clientId', 'displayName phone address')
+        .populate('teamId', 'firmName teamCode')
+        .lean(),
+      Team.find({
+        cases: {
+          $elemMatch: {
+            addedBy: req.user._id,
+            hearingDate: { $gte: now },
+            status: { $ne: 'closed' },
+          },
+        },
+      })
+        .select('firmName teamCode cases')
+        .lean(),
+    ]);
+    const caseIds = legalCases.map((legalCase) => legalCase._id);
+    const hearings = await (caseIds.length
+      ? Hearing.find({
+        caseId: { $in: caseIds },
+        isHistorical: { $ne: true },
+        $or: [
+          { hearingDate: { $gte: now }, nextHearingDate: null },
+          { nextHearingDate: { $gte: now } },
+        ],
+      }).sort({ hearingDate: 1, _id: 1 }).lean()
+      : []);
+    const hearingsByCaseId = new Map();
+    hearings.forEach((hearing) => {
+      const key = String(hearing.caseId);
+      if (!hearingsByCaseId.has(key)) hearingsByCaseId.set(key, []);
+      hearingsByCaseId.get(key).push(hearing);
+    });
+    const migratedLegacyKeys = new Set(
+      legalCases
+        .filter((legalCase) => legalCase.legacyTeamId && legalCase.legacyCaseId)
+        .map((legalCase) => `${String(legalCase.legacyTeamId)}:${String(legalCase.legacyCaseId)}`)
+    );
+    const normalizedCases = legalCases
+      .map((legalCase) => {
+        const caseHearings = hearingsByCaseId.get(String(legalCase._id)) || [];
+        const activeHearing = caseHearings.find((hearing) => !hearing.nextHearingDate && hearing.isHistorical !== true);
+        const fallbackUpcoming = caseHearings
+          .filter((hearing) => hearing.nextHearingDate && new Date(hearing.nextHearingDate) >= now)
+          .sort((left, right) => new Date(left.nextHearingDate) - new Date(right.nextHearingDate))[0];
+        const upcomingHearing = activeHearing || (fallbackUpcoming ? {
+          hearingDate: fallbackUpcoming.nextHearingDate,
+          hearingTime: fallbackUpcoming.nextHearingTime ?? dateTimeParts(fallbackUpcoming.nextHearingDate).time,
+          courtName: fallbackUpcoming.courtName || legalCase.courtName,
+        } : null);
+        return upcomingHearing ? { legalCase, upcomingHearing } : null;
+      })
+      .filter(Boolean)
+      .map((legalCase) => {
+        const { legalCase: record, upcomingHearing } = legalCase;
+        const team = record.teamId && typeof record.teamId === 'object' ? record.teamId : null;
+        return {
+          ...formatCase(record, [], req.user._id),
+          hearingDate: upcomingHearing.hearingDate,
+          hearingTime: upcomingHearing.hearingTime ?? dateTimeParts(upcomingHearing.hearingDate).time,
+          courtName: upcomingHearing.courtName || record.courtName,
+          teamId: team?._id ? String(team._id) : (record.teamId ? String(record.teamId) : ''),
+          teamName: team?.firmName || 'No team',
+          teamCode: team?.teamCode || 'Not added',
+        };
+      });
+    const legacyCases = legacyTeams.flatMap((team) => (
+      Array.isArray(team.cases) ? team.cases : []
+    ).filter((legacyCase) => {
+      if (String(legacyCase.addedBy?._id || legacyCase.addedBy || '') !== String(req.user._id)) return false;
+      if (String(legacyCase.status || '').toLowerCase() === 'closed') return false;
+      const hearingDateValue = legacyCase.nextHearingDate || legacyCase.hearingDate;
+      if (!hearingDateValue) return false;
+      const hearingDate = new Date(hearingDateValue);
+      if (Number.isNaN(hearingDate.getTime()) || hearingDate < now) return false;
+      return !migratedLegacyKeys.has(`${String(team._id)}:${String(legacyCase._id)}`);
+    }).map((legacyCase) => formatLegacyEmbeddedCase({
+      ...legacyCase,
+      hearingDate: legacyCase.nextHearingDate || legacyCase.hearingDate,
+    }, team, req.user._id)));
+    const cases = [...normalizedCases, ...legacyCases]
+      .sort((left, right) => new Date(left.hearingDate) - new Date(right.hearingDate))
+      .slice(0, limit);
+    res.json({ cases, page: 1, limit });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
