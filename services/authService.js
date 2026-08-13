@@ -53,18 +53,101 @@ const assertNoDuplicateAccount = async ({ email, phone, googleId }) => {
   throw error;
 };
 
+const LawyerVerificationRequest = require('../models/LawyerVerificationRequest');
+
 const createUserFromPending = async (pending) => {
+  const isLawyer = pending.role === 'lawyer';
+
+  if (isLawyer) {
+    const existingActiveUser = await User.findOne({ email: pending.email.toLowerCase() });
+    if (existingActiveUser) {
+      const error = new Error('Email already registered');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const barEnrollment = pending.lawyerProfile?.barId || pending.lawyerProfile?.barEnrollmentNumber || 'PENDING';
+    const specialization = pending.lawyerProfile?.specialization || 'General Practice';
+    const experienceYears = pending.lawyerProfile?.experienceYears || 1;
+
+    let verificationRequest = await LawyerVerificationRequest.findOne({ email: pending.email.toLowerCase() });
+
+    if (verificationRequest) {
+      verificationRequest.firstName = pending.firstName;
+      verificationRequest.lastName = pending.lastName;
+      verificationRequest.phone = pending.phone;
+      verificationRequest.password = pending.password;
+      verificationRequest.barId = barEnrollment;
+      verificationRequest.barEnrollmentNumber = barEnrollment;
+      verificationRequest.specialization = specialization;
+      verificationRequest.experienceYears = experienceYears;
+      verificationRequest.city = pending.address?.city || '';
+      verificationRequest.state = pending.address?.state || '';
+      verificationRequest.pincode = pending.address?.pincode || '';
+      verificationRequest.address = pending.address?.fullAddress || pending.address?.street || '';
+      verificationRequest.status = 'pending';
+      verificationRequest.rejectionReason = '';
+
+      if (pending.password) {
+        verificationRequest.$locals = verificationRequest.$locals || {};
+        verificationRequest.$locals.passwordIsHashed = true;
+      }
+
+      await verificationRequest.save();
+    } else {
+      verificationRequest = new LawyerVerificationRequest({
+        firstName: pending.firstName,
+        lastName: pending.lastName,
+        email: pending.email,
+        phone: pending.phone,
+        password: pending.password,
+        role: 'lawyer',
+        barId: barEnrollment,
+        barEnrollmentNumber: barEnrollment,
+        specialization,
+        experienceYears,
+        city: pending.address?.city || '',
+        state: pending.address?.state || '',
+        pincode: pending.address?.pincode || '',
+        address: pending.address?.fullAddress || pending.address?.street || '',
+        status: 'pending',
+      });
+
+      if (pending.password) {
+        verificationRequest.$locals = verificationRequest.$locals || {};
+        verificationRequest.$locals.passwordIsHashed = true;
+      }
+
+      await verificationRequest.save();
+    }
+
+    return {
+      _id: verificationRequest._id,
+      id: verificationRequest._id,
+      firstName: verificationRequest.firstName,
+      lastName: verificationRequest.lastName,
+      email: verificationRequest.email,
+      phone: verificationRequest.phone,
+      role: 'lawyer',
+      accountStatus: 'pending_approval',
+      verified: true,
+      emailVerified: true,
+      phoneVerified: true,
+      lawyerProfile: {
+        barId: verificationRequest.barId,
+        barEnrollmentNumber: verificationRequest.barEnrollmentNumber,
+        specialization: verificationRequest.specialization,
+        experienceYears: verificationRequest.experienceYears,
+        isVerified: false,
+      },
+    };
+  }
+
   await assertNoDuplicateAccount({
     email: pending.email,
     phone: pending.phone,
     googleId: pending.googleId,
   });
-
-  const isLawyer = pending.role === 'lawyer';
-  const initialAccountStatus = isLawyer ? 'pending_approval' : 'active';
-  const updatedLawyerProfile = isLawyer && pending.lawyerProfile
-    ? { ...pending.lawyerProfile, isVerified: false }
-    : pending.lawyerProfile;
 
   const user = new User({
     firstName: pending.firstName,
@@ -78,12 +161,12 @@ const createUserFromPending = async (pending) => {
     verified: true,
     emailVerified: true,
     phoneVerified: true,
-    accountStatus: initialAccountStatus,
+    accountStatus: 'active',
     profilePicture: pending.profilePicture,
     profileImage: pending.profilePicture,
     address: pending.address,
     location: pending.location,
-    lawyerProfile: updatedLawyerProfile,
+    lawyerProfile: pending.lawyerProfile,
     studentProfile: pending.studentProfile,
   });
 
