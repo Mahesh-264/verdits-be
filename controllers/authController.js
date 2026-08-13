@@ -64,6 +64,40 @@ const normalizePhone = (value) => trimString(value);
 const isEmailAddress = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 const isMobileNumber = (value) => /^\+?[0-9]{10,15}$/.test(String(value || '').replace(/[\s-]/g, ''));
 
+const createLawyerVerificationToken = (verificationRequest) => jwt.sign(
+  {
+    type: 'lawyer-verification-status',
+    requestId: String(verificationRequest._id),
+    email: verificationRequest.email,
+  },
+  process.env.JWT_SECRET,
+  { expiresIn: '30d' }
+);
+
+const sendLawyerVerificationCreated = (res, verificationRequest) => {
+  const user = {
+    _id: verificationRequest._id,
+    id: verificationRequest._id,
+    firstName: verificationRequest.firstName,
+    lastName: verificationRequest.lastName,
+    email: verificationRequest.email,
+    role: 'lawyer',
+    accountStatus: 'pending_approval',
+    lawyerProfile: {
+      barId: verificationRequest.barId,
+      barEnrollmentNumber: verificationRequest.barEnrollmentNumber,
+      isVerified: false,
+    },
+  };
+
+  return sendAuthSuccess(res, 201, {
+    code: 'LAWYER_VERIFICATION_PENDING',
+    message: 'Lawyer registration submitted for verification.',
+    user,
+    verificationToken: createLawyerVerificationToken(verificationRequest),
+  });
+};
+
 const normalizeVerificationTarget = (channel, value) => (
   channel === 'email' ? normalizeEmail(value) : normalizePhone(value).replace(/[\s-]/g, '')
 );
@@ -905,6 +939,11 @@ exports.register = async (req, res) => {
     const user = await createUserFromPending(userData);
     await VerificationOtp.deleteMany({ $or: [{ target: email }, { target: phone }] });
     await PendingRegistration.deleteMany({ $or: [{ email }, { phone }] });
+
+    // Lawyer applications are intentionally not logged into the product. Their
+    // verification request remains the source of truth until an admin approves it.
+    if (role === 'lawyer') return sendLawyerVerificationCreated(res, user);
+
     const session = await issueSession(user);
     setRefreshCookie(res, session.refreshToken);
 
@@ -919,6 +958,59 @@ exports.register = async (req, res) => {
       ));
     }
     sendAuthError(res, error);
+  }
+};
+
+// Returns the current status from the same records used by the admin approval
+// workflow. The status token is issued only when the lawyer submits registration.
+exports.getLawyerVerificationStatus = async (req, res) => {
+  try {
+    const token = req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7)
+      : '';
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (payload.type !== 'lawyer-verification-status' || !payload.email) {
+      return res.status(401).json({ message: 'Invalid verification status session.' });
+    }
+
+    const email = normalizeEmail(payload.email);
+    const verificationRequest = await LawyerVerificationRequest.findOne({ email }).lean();
+    if (verificationRequest) {
+      return res.json({
+        status: verificationRequest.status,
+        rejectionReason: verificationRequest.rejectionReason || '',
+        firstName: verificationRequest.firstName,
+        lastName: verificationRequest.lastName,
+        email: verificationRequest.email,
+        barEnrollmentNumber: verificationRequest.barEnrollmentNumber || verificationRequest.barId || '',
+      });
+    }
+
+    // Approval migrates the application into User and removes the request. This
+    // is deliberately the existing admin workflow, not a parallel status field.
+    const approvedLawyer = await User.findOne({
+      email,
+      role: 'lawyer',
+      accountStatus: 'active',
+      'lawyerProfile.isVerified': true,
+    }).lean();
+    if (approvedLawyer) {
+      return res.json({
+        status: 'approved',
+        firstName: approvedLawyer.firstName,
+        lastName: approvedLawyer.lastName,
+        email: approvedLawyer.email,
+        barEnrollmentNumber: approvedLawyer.lawyerProfile?.barEnrollmentNumber || approvedLawyer.lawyerProfile?.barId || '',
+      });
+    }
+
+    return res.status(404).json({ message: 'Verification request could not be found. Please contact support.' });
+  } catch (error) {
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+      return res.status(401).json({ message: 'Verification status session has expired. Please contact support.' });
+    }
+    return res.status(500).json({ message: 'Unable to check verification status. Please try again.' });
   }
 };
 
@@ -990,26 +1082,10 @@ exports.login = async (req, res) => {
           throw authError(AUTH_CODES.WRONG_PASSWORD, 'Incorrect password.', { status: 401, field: 'password' });
         }
 
-        authenticatedUser = {
-          _id: verificationRequest._id,
-          id: verificationRequest._id,
-          firstName: verificationRequest.firstName,
-          lastName: verificationRequest.lastName,
-          email: verificationRequest.email,
-          phone: verificationRequest.phone,
-          role: 'lawyer',
-          accountStatus: verificationRequest.status === 'pending' ? 'pending_approval' : 'rejected',
-          verified: true,
-          emailVerified: true,
-          phoneVerified: true,
-          lawyerProfile: {
-            barId: verificationRequest.barId,
-            barEnrollmentNumber: verificationRequest.barEnrollmentNumber,
-            specialization: verificationRequest.specialization,
-            experienceYears: verificationRequest.experienceYears,
-            isVerified: false,
-          },
-        };
+        if (verificationRequest.status === 'rejected') {
+          throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer registration has been rejected.', { status: 403 });
+        }
+        throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer account is awaiting verification.', { status: 403 });
       } else {
         throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
       }
@@ -1023,6 +1099,12 @@ exports.login = async (req, res) => {
       if (accountStatus === 'suspended') throw authError(AUTH_CODES.ACCOUNT_SUSPENDED, 'This account has been suspended.', { status: 403 });
       if (accountStatus === 'deleted') throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
 
+      if (authenticatedUser.role === 'lawyer' && accountStatus === 'pending_approval') {
+        throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer account is awaiting verification.', { status: 403 });
+      }
+      if (authenticatedUser.role === 'lawyer' && accountStatus === 'rejected') {
+        throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer registration has been rejected.', { status: 403 });
+      }
       if (authenticatedUser.role !== 'lawyer' && accountStatus === 'pending_approval') {
         throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your account is pending administrator approval.', { status: 403 });
       }
@@ -1368,6 +1450,8 @@ exports.googleAuth = async (req, res) => {
         { googleId: googleProfile.googleId },
       ],
     });
+    if (role === 'lawyer') return sendLawyerVerificationCreated(res, user);
+
     const session = await issueSession(user);
     setRefreshCookie(res, session.refreshToken);
 
@@ -3518,6 +3602,8 @@ exports.updateLawyerStatus = async (req, res) => {
       const verificationRequest = await LawyerVerificationRequest.findById(id);
       if (verificationRequest) {
         verificationRequest.status = 'rejected';
+        verificationRequest.rejectionReason = trimString(req.body.rejectionReason)
+          || 'Your lawyer registration could not be approved.';
         await verificationRequest.save();
         console.log(`👮 Verification request ${id} marked as REJECTED`);
         return res.json({

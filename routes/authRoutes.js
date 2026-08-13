@@ -67,6 +67,7 @@ router.use((req, res, next) => {
 });
 
 router.post('/register', authLimiter, authController.register);
+router.get('/lawyer-verification-status', authController.getLawyerVerificationStatus);
 router.post('/login', loginLimiter, authController.login);
 router.post('/google', loginLimiter, authController.googleAuth);
 router.post('/registration/check-email', authLimiter, authController.checkEmailAvailability);
