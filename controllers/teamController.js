@@ -159,8 +159,8 @@ const formatCase = (legalCase, documents = [], viewerId) => {
     nextHearingDate: legalCase.nextHearingAt || null,
     hearingDate: legalCase.nextHearingAt || null,
     documents: documents.map((document) => ({ id: String(document._id), name: document.name, url: document.url })),
-    status: legalCase.status,
-    addedBy: legalCase.ownerId,
+    status: legalCase.status || 'new',
+    addedBy: legalCase.ownerId?._id || legalCase.ownerId,
     addedByName: getDisplayName(legalCase.ownerId, 'Lawyer'),
     canEdit: String(legalCase.ownerId?._id || legalCase.ownerId) === String(viewerId),
     createdAt: legalCase.createdAt,
@@ -205,7 +205,43 @@ const getWorkspace = async (userId, selectedTeamId) => {
   const memberships = await TeamMember.find({ userId, status: 'active' }).lean();
   const teamIds = memberships.map((member) => member.teamId);
   const teams = await Team.find({ _id: { $in: teamIds }, status: 'active' }).sort({ updatedAt: -1 }).lean();
-  if (!teams.length) return { team: null, teams: [], activeTeamId: null };
+  if (!teams.length) {
+    const legalCases = await LegalCase.find({
+      $or: [{ ownerId: userId }, { createdBy: userId }, { addedBy: userId }],
+      archivedAt: null,
+    })
+      .populate('ownerId', 'firstName lastName phone')
+      .populate('clientId', 'displayName phone address')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean();
+
+    const caseIds = legalCases.map((legalCase) => legalCase._id);
+    const documents = caseIds.length
+      ? await CaseDocument.find({ caseId: { $in: caseIds }, deletedAt: null }).sort({ createdAt: -1 }).lean()
+      : [];
+    const documentsByCase = documents.reduce((map, document) => {
+      const key = String(document.caseId);
+      map.set(key, [...(map.get(key) || []), document]);
+      return map;
+    }, new Map());
+
+    const workspace = {
+      id: 'personal',
+      role: 'owner',
+      teamCode: '',
+      firmName: 'My Cases',
+      seniorLawyerName: '',
+      maxTeamSize: 1,
+      seniorLawyer: userId,
+      members: [],
+      pendingRequests: [],
+      cases: legalCases.map((legalCase) => formatCase(legalCase, documentsByCase.get(String(legalCase._id)) || [], userId)),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    return { team: workspace, teams: [], activeTeamId: null };
+  }
 
   const selected = selectedTeamId && teams.find((team) => String(team._id) === String(selectedTeamId));
   const activeTeam = selected || teams[0];
@@ -215,7 +251,7 @@ const getWorkspace = async (userId, selectedTeamId) => {
     TeamMember.find({ teamId: activeTeam._id, status: 'active' })
       .populate('userId', 'firstName lastName email phone profileImage role')
       .sort({ role: 1, joinedAt: 1 }).lean(),
-    activeMembership.role === 'owner'
+    activeMembership && activeMembership.role === 'owner'
       ? TeamJoinRequest.find({ teamId: activeTeam._id, status: 'pending' })
         .populate('requesterId', 'firstName lastName email phone').sort({ requestedAt: -1 }).lean()
       : [],
@@ -249,7 +285,7 @@ const getWorkspace = async (userId, selectedTeamId) => {
     .map((member) => formatMember(member, { hasTeam: memberTeamOwnerIds.has(String(member.userId?._id || member.userId)) }));
   const workspace = {
     id: String(activeTeam._id),
-    role: activeMembership.role,
+    role: activeMembership?.role || 'owner',
     teamCode: activeTeam.teamCode,
     firmName: activeTeam.firmName,
     seniorLawyerName: activeTeam.seniorLawyerName,
@@ -267,7 +303,7 @@ const getWorkspace = async (userId, selectedTeamId) => {
   };
   return {
     team: workspace,
-    teams: teams.map((team) => ({ id: String(team._id), teamCode: team.teamCode, firmName: team.firmName, role: membershipByTeam.get(String(team._id)).role })),
+    teams: teams.map((team) => ({ id: String(team._id), teamCode: team.teamCode, firmName: team.firmName, role: membershipByTeam.get(String(team._id))?.role || 'member' })),
     activeTeamId: String(activeTeam._id),
   };
 };
@@ -420,16 +456,9 @@ exports.deleteTeam = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team');
     const { team } = await requireTeamOwner(req.params.teamId, req.user._id);
-    const calendarHearings = await Hearing.find({ teamId: team._id, googleEventId: { $exists: true, $ne: null } });
-    await deleteCalendarEventsForCase(calendarHearings);
     await runInTransaction(async (session) => {
       await requireTeamOwner(req.params.teamId, req.user._id, { session });
       await Promise.all([
-        Hearing.deleteMany({ teamId: team._id }).session(session),
-        CaseDocument.deleteMany({ teamId: team._id }).session(session),
-        ActivityEvent.deleteMany({ teamId: team._id }).session(session),
-        LegalCase.deleteMany({ teamId: team._id }).session(session),
-        Client.deleteMany({ teamId: team._id }).session(session),
         TeamMember.deleteMany({ teamId: team._id }).session(session),
         TeamJoinRequest.deleteMany({ teamId: team._id }).session(session),
         Team.deleteOne({ _id: team._id }).session(session),

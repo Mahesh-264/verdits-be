@@ -33,30 +33,50 @@ const requireTeamOwner = async (teamId, userId, options = {}) => {
   return context;
 };
 
-// A team workspace is organized around each lawyer's own cases. Any active
-// member may read the team's case directory, while write/delete permissions
-// remain limited to the lawyer who created the case below.
-const getCaseReadScope = ({ teamId }) => ({ teamId });
+// Cases belong to lawyers independently of team life-cycle.
+// When viewing a team workspace or My Cases, a lawyer sees:
+// 1. All cases created in the active team.
+// 2. All cases owned/created by the lawyer across any team view.
+const getCaseReadScope = ({ teamId, userId }) => {
+  if (userId && teamId) {
+    return {
+      $or: [
+        { teamId },
+        { ownerId: userId },
+        { createdBy: userId },
+        { addedBy: userId },
+      ],
+    };
+  }
+  if (userId) {
+    return {
+      $or: [
+        { ownerId: userId },
+        { createdBy: userId },
+        { addedBy: userId },
+      ],
+    };
+  }
+  return { teamId };
+};
 
-// Dashboard "My Cases" and Next Hearings always require both sides of the
-// relationship: a case owned by this lawyer and a team where their membership
-// is active.  Keeping this scope here prevents future dashboard queries from
-// accidentally falling back to ownership-only access.
-const getOwnedCaseScopeForActiveTeams = ({ teamIds, userId }) => ({
-  teamId: { $in: teamIds },
-  $or: [
-    { ownerId: userId },
-    { createdBy: userId },
-    // Read compatibility for records imported from the former embedded model.
-    { addedBy: userId },
-  ],
-  status: { $ne: 'closed' },
-  archivedAt: null,
-});
+// Dashboard "My Cases" and Next Hearings query owned cases across all teams.
+const getOwnedCaseScopeForActiveTeams = ({ teamIds, userId }) => {
+  const scope = {
+    $or: [
+      { ownerId: userId },
+      { createdBy: userId },
+      { addedBy: userId },
+    ],
+    status: { $ne: 'closed' },
+    archivedAt: null,
+  };
+  if (teamIds && teamIds.length) {
+    scope.$or.unshift({ teamId: { $in: teamIds } });
+  }
+  return scope;
+};
 
-// All Team Case readers must start from this scope so a selected team's
-// directory is consistent for owners and joined members. Additional visibility
-// rules are added here instead of being reimplemented in individual endpoints.
 const getAuthorizedTeamCaseScope = ({ teamId, userId, membership, includeClosed = true, includeArchived = true }) => {
   const scope = getCaseReadScope({ teamId, userId, membership });
   if (!includeClosed) scope.status = { $ne: 'closed' };
@@ -66,20 +86,51 @@ const getAuthorizedTeamCaseScope = ({ teamId, userId, membership, includeClosed 
 
 const requireCaseAccess = async (caseId, teamId, userId, action = 'read', options = {}) => {
   assertObjectId(caseId, 'Case');
-  const { team, membership } = await requireActiveMembership(teamId, userId, options);
-  const query = Case.findOne({ _id: caseId, teamId });
+  const query = Case.findById(caseId);
   if (options.session) query.session(options.session);
   const legalCase = await query;
   if (!legalCase) throw domainError(404, 'Case not found');
 
-  const isCaseOwner = String(legalCase.ownerId) === String(userId);
-  const mayRead = Boolean(membership);
-  if (!mayRead) throw domainError(403, 'You do not have access to this case');
-  if (action !== 'read' && !isCaseOwner) {
+  const isCaseOwner = String(legalCase.ownerId) === String(userId) ||
+                      String(legalCase.createdBy) === String(userId) ||
+                      String(legalCase.addedBy) === String(userId);
+
+  let team = null;
+  let membership = null;
+
+  if (teamId) {
+    assertObjectId(teamId, 'Team');
+    team = await Team.findOne({ _id: teamId, status: 'active' }).session(options.session || null).lean();
+    if (team) {
+      membership = await getActiveMembership(teamId, userId, options);
+    }
+  }
+
+  if (!team && legalCase.teamId) {
+    team = await Team.findOne({ _id: legalCase.teamId, status: 'active' }).session(options.session || null).lean();
+    if (team) {
+      membership = await getActiveMembership(legalCase.teamId, userId, options);
+    }
+  }
+
+  if (isCaseOwner) {
+    return {
+      team: team || { _id: legalCase.teamId, firmName: 'My Cases' },
+      membership: membership || { role: 'owner' },
+      legalCase,
+      isCaseOwner: true,
+    };
+  }
+
+  if (!membership) {
+    throw domainError(403, 'You do not have access to this case');
+  }
+
+  if (action !== 'read') {
     throw domainError(403, 'Only the case owner can modify or delete this case');
   }
 
-  return { team, membership, legalCase, isCaseOwner };
+  return { team, membership, legalCase, isCaseOwner: false };
 };
 
 module.exports = {
