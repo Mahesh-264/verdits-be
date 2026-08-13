@@ -11,6 +11,7 @@ router.get('/:teamId/members/:memberId/owned-team', teamController.getMemberOwne
 router.post('/', teamController.createTeam);
 router.post('/join-requests', teamController.requestToJoin);
 router.patch('/:teamId/join-requests/:requestId/:decision', teamController.decideJoinRequest);
+router.delete('/:teamId', teamController.deleteTeam);
 router.delete('/:teamId/members/:memberId', teamController.removeMember);
 router.post('/:teamId/cases', teamController.createCase);
 router.get('/:teamId/cases/:caseId', teamController.getCaseDetails);
