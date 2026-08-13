@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const TeamMember = require('../models/TeamMember');
-const { getCaseReadScope, getAuthorizedTeamCaseScope } = require('../services/teamAuthorizationService');
+const { getCaseReadScope, getAuthorizedTeamCaseScope, getOwnedCaseScopeForActiveTeams } = require('../services/teamAuthorizationService');
 
 test('Team Owner case scope includes every case in their team', () => {
   const teamId = new mongoose.Types.ObjectId();
@@ -44,4 +44,15 @@ test('TeamMember declares a unique active Team Owner invariant', () => {
       && options.partialFilterExpression?.role === 'owner'
       && options.partialFilterExpression?.status === 'active'
   )));
+});
+
+test('Dashboard owned-case scope requires active team ids and lawyer ownership', () => {
+  const teamId = new mongoose.Types.ObjectId();
+  const lawyerId = new mongoose.Types.ObjectId();
+  assert.deepEqual(getOwnedCaseScopeForActiveTeams({ teamIds: [teamId], userId: lawyerId }), {
+    teamId: { $in: [teamId] },
+    $or: [{ ownerId: lawyerId }, { createdBy: lawyerId }, { addedBy: lawyerId }],
+    status: { $ne: 'closed' },
+    archivedAt: null,
+  });
 });

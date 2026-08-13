@@ -19,6 +19,7 @@ const {
   assertObjectId,
   domainError,
   getAuthorizedTeamCaseScope,
+  getOwnedCaseScopeForActiveTeams,
   requireActiveMembership,
   requireCaseAccess,
   requireTeamOwner,
@@ -412,6 +413,7 @@ exports.createTeam = async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
+<<<<<<< Updated upstream
 exports.deleteTeam = async (req, res) => {
   try {
     assertObjectId(req.params.teamId, 'Team');
@@ -445,6 +447,32 @@ exports.deleteTeam = async (req, res) => {
     await deleteCalendarEventsForCase(result.hearings);
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: result.memberIds, event: 'team:deleted', teamId: result.team._id, payload: { teamName: result.team.firmName } });
     res.json({ message: 'Team deleted' });
+=======
+// Team data is entirely team-scoped in the normalized domain. Delete only
+// records carrying this exact teamId; no user-owned records from another team
+// can be reached by this cascade.
+exports.deleteTeam = async (req, res) => {
+  try {
+    assertObjectId(req.params.teamId, 'Team');
+    const { team } = await requireTeamOwner(req.params.teamId, req.user._id);
+    const calendarHearings = await Hearing.find({ teamId: team._id, googleEventId: { $exists: true, $ne: null } });
+    await deleteCalendarEventsForCase(calendarHearings);
+    await runInTransaction(async (session) => {
+      await requireTeamOwner(req.params.teamId, req.user._id, { session });
+      await Promise.all([
+        Hearing.deleteMany({ teamId: team._id }).session(session),
+        CaseDocument.deleteMany({ teamId: team._id }).session(session),
+        ActivityEvent.deleteMany({ teamId: team._id }).session(session),
+        LegalCase.deleteMany({ teamId: team._id }).session(session),
+        Client.deleteMany({ teamId: team._id }).session(session),
+        TeamMember.deleteMany({ teamId: team._id }).session(session),
+        TeamJoinRequest.deleteMany({ teamId: team._id }).session(session),
+        Team.deleteOne({ _id: team._id }).session(session),
+      ]);
+    });
+    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id], event: 'team:deleted', teamId: team._id, payload: { teamId: String(team._id) } });
+    res.json({ success: true, message: 'Team deleted', data: await getWorkspace(req.user._id) });
+>>>>>>> Stashed changes
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
@@ -810,27 +838,24 @@ exports.getMyNextHearings = async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
     const now = new Date();
-    // Next Hearings is based solely on case ownership. Team membership and
-    // selected workspace must never constrain this dashboard query. Support
-    // both current and legacy ownership fields so older cases still appear.
+    // The selected workspace does not constrain this query. Active
+    // TeamMember rows do: a lawyer's own case becomes ineligible immediately
+    // after leaving its team.
+    const activeMemberships = await TeamMember.find({ userId: req.user._id, status: 'active' }).select('teamId').lean();
+    const membershipTeamIds = activeMemberships.map((membership) => membership.teamId);
+    const activeTeams = membershipTeamIds.length
+      ? await Team.find({ _id: { $in: membershipTeamIds }, status: 'active' }).select('_id').lean()
+      : [];
+    const activeTeamIds = activeTeams.map((team) => team._id);
+    if (!activeTeamIds.length) return res.json({ cases: [], page: 1, limit });
     const [legalCases, legacyTeams] = await Promise.all([
-      LegalCase.find({
-        $and: [
-          {
-            $or: [
-              { ownerId: req.user._id },
-              { createdBy: req.user._id },
-              { addedBy: req.user._id },
-            ],
-          },
-          { status: { $ne: 'closed' } },
-          { archivedAt: null },
-        ],
-      })
+      LegalCase.find(getOwnedCaseScopeForActiveTeams({ teamIds: activeTeamIds, userId: req.user._id }))
         .populate('clientId', 'displayName phone address')
         .populate('teamId', 'firmName teamCode')
         .lean(),
       Team.find({
+        _id: { $in: activeTeamIds },
+        status: 'active',
         cases: {
           $elemMatch: {
             addedBy: req.user._id,

@@ -38,6 +38,22 @@ const requireTeamOwner = async (teamId, userId, options = {}) => {
 // remain limited to the lawyer who created the case below.
 const getCaseReadScope = ({ teamId }) => ({ teamId });
 
+// Dashboard "My Cases" and Next Hearings always require both sides of the
+// relationship: a case owned by this lawyer and a team where their membership
+// is active.  Keeping this scope here prevents future dashboard queries from
+// accidentally falling back to ownership-only access.
+const getOwnedCaseScopeForActiveTeams = ({ teamIds, userId }) => ({
+  teamId: { $in: teamIds },
+  $or: [
+    { ownerId: userId },
+    { createdBy: userId },
+    // Read compatibility for records imported from the former embedded model.
+    { addedBy: userId },
+  ],
+  status: { $ne: 'closed' },
+  archivedAt: null,
+});
+
 // All Team Case readers must start from this scope so a selected team's
 // directory is consistent for owners and joined members. Additional visibility
 // rules are added here instead of being reimplemented in individual endpoints.
@@ -71,6 +87,7 @@ module.exports = {
   domainError,
   getActiveMembership,
   getCaseReadScope,
+  getOwnedCaseScopeForActiveTeams,
   getAuthorizedTeamCaseScope,
   requireActiveMembership,
   requireCaseAccess,
