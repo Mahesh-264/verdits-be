@@ -103,6 +103,7 @@ router.post('/jam-sessions/:sessionId/comments', authorize('student', 'lawyer'),
 router.get('/lawyer/student-interactions', authorize('lawyer'), authController.getLawyerStudentInteractions);
 router.post('/lawyer/internships', authorize('lawyer'), authController.createLawyerInternship);
 router.post('/lawyer/jam-sessions', authorize('lawyer'), authController.createLawyerJamSession);
+router.get('/lawyer/jam-sessions/:sessionId/participants', authorize('lawyer'), authController.getLawyerJamSessionParticipants);
 // The normalized /api/teams API is the sole Team/Case mutation surface.
 // Keeping these paths reachable would allow bypassing TeamMember authorization.
 router.get('/lawyer/team', authorize('lawyer'), retiredTeamEndpoint);
