@@ -1994,9 +1994,8 @@ exports.getLawyerStudentInteractions = async (req, res) => {
     const jamSessions = (lawyer.lawyerProfile?.jamSessions || [])
       .slice()
       .sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0))
-      .map((session) => ({
-        ...formatPublishedJamSession(lawyer, session, { viewerId: req.user._id }),
-        joinedStudents: (session.participants || []).map((participant) => ({
+      .map((session) => {
+        const joinedStudents = (session.participants || []).map((participant) => ({
           id: participant._id,
           studentId: participant.studentId,
           name: participant.name || 'Student',
@@ -2005,8 +2004,14 @@ exports.getLawyerStudentInteractions = async (req, res) => {
           yearOfStudy: participant.yearOfStudy || '',
           status: 'joined',
           joinedAt: participant.joinedAt,
-        })),
-      }));
+        }));
+
+        return {
+          ...formatPublishedJamSession(lawyer, session, { viewerId: req.user._id }),
+          participantCount: joinedStudents.length,
+          joinedStudents,
+        };
+      });
 
     const followerUsers = await User.find({
       $or: [
@@ -2131,6 +2136,9 @@ exports.createLawyerJamSession = async (req, res) => {
       ...currentProfile,
       jamSessions: [jamSession, ...currentJamSessions],
     });
+    // Explicitly mark the nested profile dirty so the new session is reliably
+    // persisted before the dashboard reloads.
+    lawyer.markModified('lawyerProfile');
 
     await lawyer.save();
 
@@ -2149,6 +2157,40 @@ exports.createLawyerJamSession = async (req, res) => {
       message: 'Jam session published',
       jamSession: formatPublishedJamSession(lawyer, savedJamSession, { viewerId: req.user._id }),
     });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// 15A. GET PARTICIPANTS FOR A LAWYER'S JAM SESSION
+exports.getLawyerJamSessionParticipants = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id).select('role lawyerProfile.jamSessions');
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can view jam session participants' });
+    }
+
+    const session = (lawyer.lawyerProfile?.jamSessions || []).find(
+      (item) => String(item._id) === String(req.params.sessionId)
+    );
+
+    if (!session) {
+      return res.status(404).json({ message: 'Jam session not found' });
+    }
+
+    const participants = (session.participants || []).map((participant) => ({
+      id: String(participant._id),
+      studentId: String(participant.studentId || ''),
+      name: participant.name || 'Student',
+      email: participant.email || '',
+      collegeName: participant.collegeName || '',
+      yearOfStudy: participant.yearOfStudy || '',
+      status: 'joined',
+      joinedAt: participant.joinedAt,
+    }));
+
+    res.json({ participants });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -2810,6 +2852,10 @@ exports.joinJamSession = async (req, res) => {
     const session = targetLawyer.lawyerProfile.jamSessions[sessionIndex];
     session.participants = session.participants || [];
 
+    if (session.participants.some((participant) => String(participant.studentId) === String(student._id))) {
+      return res.status(400).json({ message: 'You already joined this jam session' });
+    }
+
     const participantName = req.body.name?.trim() || getDisplayName(student);
     const participantEmail = req.body.email?.trim() || student.email || '';
 
@@ -2850,6 +2896,7 @@ exports.joinJamSession = async (req, res) => {
         title: session.title || 'Jam Session',
         joinedAt: new Date().toISOString(),
       },
+      participantCount: session.participants.length,
       user: student.toObject(),
     });
   } catch (error) {
