@@ -413,41 +413,6 @@ exports.createTeam = async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
-<<<<<<< Updated upstream
-exports.deleteTeam = async (req, res) => {
-  try {
-    assertObjectId(req.params.teamId, 'Team');
-    const result = await runInTransaction(async (session) => {
-      const { team } = await requireTeamOwner(req.params.teamId, req.user._id, { session });
-      const [members, legalCases, hearings] = await Promise.all([
-        TeamMember.find({ teamId: team._id, status: 'active' }).session(session).lean(),
-        LegalCase.find({ teamId: team._id }).select('_id').session(session).lean(),
-        Hearing.find({ teamId: team._id }).session(session).lean(),
-      ]);
-      const caseIds = legalCases.map((legalCase) => legalCase._id);
-      await Promise.all([
-        CaseDocument.deleteMany({ teamId: team._id }).session(session),
-        Hearing.deleteMany({ teamId: team._id }).session(session),
-        Client.deleteMany({ teamId: team._id }).session(session),
-        TeamJoinRequest.deleteMany({ teamId: team._id }).session(session),
-        TeamMember.deleteMany({ teamId: team._id }).session(session),
-        // Clear only the legacy profile pointers for this exact team. A lawyer
-        // may belong to another normalized workspace, which must be retained.
-        User.updateMany(
-          { _id: { $in: members.map((member) => member.userId) }, 'lawyerProfile.team.teamCode': team.teamCode },
-          { $set: { 'lawyerProfile.team': { teamCode: '', firmName: '', seniorLawyerName: '', isSeniorLawyer: false, joinedAt: null } } },
-          { session }
-        ),
-        ActivityEvent.deleteMany({ $or: [{ teamId: team._id }, { caseId: { $in: caseIds } }] }).session(session),
-        LegalCase.deleteMany({ teamId: team._id }).session(session),
-        Team.deleteOne({ _id: team._id }).session(session),
-      ]);
-      return { team, hearings, memberIds: members.map((member) => member.userId) };
-    });
-    await deleteCalendarEventsForCase(result.hearings);
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: result.memberIds, event: 'team:deleted', teamId: result.team._id, payload: { teamName: result.team.firmName } });
-    res.json({ message: 'Team deleted' });
-=======
 // Team data is entirely team-scoped in the normalized domain. Delete only
 // records carrying this exact teamId; no user-owned records from another team
 // can be reached by this cascade.
@@ -472,7 +437,6 @@ exports.deleteTeam = async (req, res) => {
     });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [req.user._id], event: 'team:deleted', teamId: team._id, payload: { teamId: String(team._id) } });
     res.json({ success: true, message: 'Team deleted', data: await getWorkspace(req.user._id) });
->>>>>>> Stashed changes
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
