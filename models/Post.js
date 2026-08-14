@@ -8,7 +8,8 @@ const postSchema = new mongoose.Schema(
       default: 'general',
     },
     content: { type: String, required: true, trim: true },
-    media: [{ type: String }],
+    // Mixed keeps existing string image URLs valid while new uploads retain their display metadata.
+    media: { type: [mongoose.Schema.Types.Mixed], default: [] },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     visibility: {
       type: String,
