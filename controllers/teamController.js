@@ -815,34 +815,32 @@ exports.getMyNextHearings = async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
     const now = new Date();
-    // The selected workspace does not constrain this query. Active
-    // TeamMember rows do: a lawyer's own case becomes ineligible immediately
-    // after leaving its team.
     const activeMemberships = await TeamMember.find({ userId: req.user._id, status: 'active' }).select('teamId').lean();
     const membershipTeamIds = activeMemberships.map((membership) => membership.teamId);
     const activeTeams = membershipTeamIds.length
       ? await Team.find({ _id: { $in: membershipTeamIds }, status: 'active' }).select('_id').lean()
       : [];
     const activeTeamIds = activeTeams.map((team) => team._id);
-    if (!activeTeamIds.length) return res.json({ cases: [], page: 1, limit });
     const [legalCases, legacyTeams] = await Promise.all([
       LegalCase.find(getOwnedCaseScopeForActiveTeams({ teamIds: activeTeamIds, userId: req.user._id }))
         .populate('clientId', 'displayName phone address')
         .populate('teamId', 'firmName teamCode')
         .lean(),
-      Team.find({
-        _id: { $in: activeTeamIds },
-        status: 'active',
-        cases: {
-          $elemMatch: {
-            addedBy: req.user._id,
-            hearingDate: { $gte: now },
-            status: { $ne: 'closed' },
+      activeTeamIds.length
+        ? Team.find({
+          _id: { $in: activeTeamIds },
+          status: 'active',
+          cases: {
+            $elemMatch: {
+              addedBy: req.user._id,
+              hearingDate: { $gte: now },
+              status: { $ne: 'closed' },
+            },
           },
-        },
-      })
-        .select('firmName teamCode cases')
-        .lean(),
+        })
+          .select('firmName teamCode cases')
+          .lean()
+        : [],
     ]);
     const caseIds = legalCases.map((legalCase) => legalCase._id);
     const hearings = await (caseIds.length
@@ -852,6 +850,7 @@ exports.getMyNextHearings = async (req, res) => {
         $or: [
           { hearingDate: { $gte: now }, nextHearingDate: null },
           { nextHearingDate: { $gte: now } },
+          { hearingDate: { $exists: true, $ne: null } },
         ],
       }).sort({ hearingDate: 1, _id: 1 }).lean()
       : []);
@@ -873,10 +872,11 @@ exports.getMyNextHearings = async (req, res) => {
         const fallbackUpcoming = caseHearings
           .filter((hearing) => hearing.nextHearingDate && new Date(hearing.nextHearingDate) >= now)
           .sort((left, right) => new Date(left.nextHearingDate) - new Date(right.nextHearingDate))[0];
-        const upcomingHearing = activeHearing || (fallbackUpcoming ? {
-          hearingDate: fallbackUpcoming.nextHearingDate,
-          hearingTime: fallbackUpcoming.nextHearingTime ?? dateTimeParts(fallbackUpcoming.nextHearingDate).time,
-          courtName: fallbackUpcoming.courtName || legalCase.courtName,
+        const anyHearing = caseHearings[0];
+        const upcomingHearing = activeHearing || fallbackUpcoming || anyHearing || (legalCase.nextHearingAt || legalCase.startingDate ? {
+          hearingDate: legalCase.nextHearingAt || legalCase.startingDate,
+          hearingTime: '',
+          courtName: legalCase.courtName,
         } : null);
         return upcomingHearing ? { legalCase, upcomingHearing } : null;
       })
