@@ -689,7 +689,7 @@ exports.getCaseDetails = async (req, res) => {
       await resolveCaseClient({ legalCase, actorId: req.user._id, session });
       const [caseWithClient, hearings] = await Promise.all([
         LegalCase.findById(legalCase._id).populate('clientId', 'displayName phone address').populate('ownerId', 'firstName lastName').session(session).lean(),
-        Hearing.find({ caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean(),
+        Hearing.find({ caseId: legalCase._id }).sort({ hearingDate: -1, _id: -1 }).session(session).lean(),
       ]);
       return { caseWithClient, hearings };
     });
@@ -711,6 +711,9 @@ exports.syncHearingHistory = async (req, res) => {
       for (const row of req.body.hearings) {
         const hearingDate = asHearingDateTime(row.hearingDate, row.hearingTime, 'Hearing date', { required: true });
         const nextHearingDate = asHearingDateTime(row.nextHearingDate ?? row.nextHearing, row.nextHearingTime, 'Next hearing date');
+        if (hearingDate && nextHearingDate && nextHearingDate < hearingDate) {
+          throw domainError(400, 'Next hearing date cannot be earlier than hearing date');
+        }
         const hearingId = row.id || row._id;
         if (hearingId) {
           assertObjectId(hearingId, 'Hearing');
@@ -759,7 +762,7 @@ exports.syncHearingHistory = async (req, res) => {
       if (String(previousNextHearingAt || '') !== String(nextHearingAt || '')) {
         if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields: ['nextHearingAt'], before: { nextHearingAt: previousNextHearingAt }, after: { nextHearingAt }, requestId: requestId(req), session });
       }
-      const hearings = await Hearing.find({ caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean();
+      const hearings = await Hearing.find({ caseId: legalCase._id }).sort({ hearingDate: -1, _id: -1 }).session(session).lean();
       return { legalCase, team, hearings, calendarEvents };
     });
     for (const event of result.calendarEvents) {
