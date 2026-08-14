@@ -85,7 +85,6 @@ const formatHearing = (hearing) => ({
 
 const recomputeNextHearing = async (legalCase, userId, session) => {
   const query = Hearing.findOne({
-    teamId: legalCase.teamId,
     caseId: legalCase._id,
     hearingDate: { $exists: true, $ne: null },
     nextHearingDate: null,
@@ -684,13 +683,13 @@ exports.deleteCase = async (req, res) => {
 
 exports.getCaseDetails = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
     const result = await runInTransaction(async (session) => {
       const { legalCase } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'read', { session });
       await resolveCaseClient({ legalCase, actorId: req.user._id, session });
       const [caseWithClient, hearings] = await Promise.all([
         LegalCase.findById(legalCase._id).populate('clientId', 'displayName phone address').populate('ownerId', 'firstName lastName').session(session).lean(),
-        Hearing.find({ teamId: legalCase.teamId, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean(),
+        Hearing.find({ caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean(),
       ]);
       return { caseWithClient, hearings };
     });
@@ -700,13 +699,13 @@ exports.getCaseDetails = async (req, res) => {
 
 exports.syncHearingHistory = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
     if (!Array.isArray(req.body.hearings)) throw domainError(400, 'Hearings must be an array');
     const events = [];
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
       const calendarEvents = [];
-      const existing = await Hearing.find({ teamId: team._id, caseId: legalCase._id }).session(session);
+      const existing = await Hearing.find({ caseId: legalCase._id }).session(session);
       const byId = new Map(existing.map((hearing) => [String(hearing._id), hearing]));
       const seenIds = new Set();
       for (const row of req.body.hearings) {
@@ -728,34 +727,39 @@ exports.syncHearingHistory = async (req, res) => {
           hearing.nextHearingTime = row.nextHearingTime || '';
           hearing.updatedBy = req.user._id;
           await hearing.save({ session });
-          await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', changedFields: ['courtName', 'hearingDate', 'hearingDetails', 'nextHearingDate'], before, after: hearing.toObject(), requestId: requestId(req), session });
+          if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', changedFields: ['courtName', 'hearingDate', 'hearingDetails', 'nextHearingDate'], before, after: hearing.toObject(), requestId: requestId(req), session });
           const event = { event: 'hearing.updated', hearingId: hearing._id, hearing };
           events.push(event); calendarEvents.push(scheduleNextHearing ? { event: 'hearing.deleted', hearingId: hearing._id, hearing } : event);
           if (scheduleNextHearing) {
-            const [newHearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, courtName: hearing.courtName || legalCase.courtName, hearingDate: nextHearingDate, hearingTime: row.nextHearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+            const [newHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: hearing.courtName || legalCase.courtName, hearingDate: nextHearingDate, hearingTime: row.nextHearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
             const nextEvent = { event: 'hearing.created', hearingId: newHearing._id, hearing: newHearing };
             events.push(nextEvent); calendarEvents.push(nextEvent);
           }
         } else {
           const isManualHistory = row.isManualHistory === true;
-          const [hearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, courtName: trim(row.courtName) || legalCase.courtName, hearingDate, hearingTime: row.hearingTime || '', hearingDetails: trim(row.hearingDetails), nextHearingDate, nextHearingTime: row.nextHearingTime || '', isHistorical: isManualHistory, createdBy: req.user._id, updatedBy: req.user._id }], { session });
-          await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: hearing.toObject(), requestId: requestId(req), session });
+          const [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: trim(row.courtName) || legalCase.courtName, hearingDate, hearingTime: row.hearingTime || '', hearingDetails: trim(row.hearingDetails), nextHearingDate, nextHearingTime: row.nextHearingTime || '', isHistorical: isManualHistory, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+          if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: hearing.toObject(), requestId: requestId(req), session });
           const event = { event: 'hearing.created', hearingId: hearing._id, hearing };
           events.push(event); calendarEvents.push(event);
+          if (!isManualHistory && nextHearingDate) {
+            const [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: hearing.courtName, hearingDate: nextHearingDate, hearingTime: row.nextHearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+            const nextEvent = { event: 'hearing.created', hearingId: nextHearing._id, hearing: nextHearing };
+            events.push(nextEvent); calendarEvents.push(nextEvent);
+          }
         }
       }
-      for (const hearing of existing) if (!seenIds.has(String(hearing._id))) {
+      for (const [id, hearing] of byId.entries()) if (!seenIds.has(id)) {
         await Hearing.deleteOne({ _id: hearing._id }).session(session);
-        await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', before: hearing.toObject(), requestId: requestId(req), session });
+        if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', before: hearing.toObject(), requestId: requestId(req), session });
         const event = { event: 'hearing.deleted', hearingId: hearing._id, hearing };
         events.push(event); calendarEvents.push(event);
       }
       const previousNextHearingAt = legalCase.nextHearingAt;
       const nextHearingAt = await recomputeNextHearing(legalCase, req.user._id, session);
       if (String(previousNextHearingAt || '') !== String(nextHearingAt || '')) {
-        await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields: ['nextHearingAt'], before: { nextHearingAt: previousNextHearingAt }, after: { nextHearingAt }, requestId: requestId(req), session });
+        if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields: ['nextHearingAt'], before: { nextHearingAt: previousNextHearingAt }, after: { nextHearingAt }, requestId: requestId(req), session });
       }
-      const hearings = await Hearing.find({ teamId: team._id, caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean();
+      const hearings = await Hearing.find({ caseId: legalCase._id }).sort({ hearingDate: 1 }).session(session).lean();
       return { legalCase, team, hearings, calendarEvents };
     });
     for (const event of result.calendarEvents) {
@@ -763,8 +767,10 @@ exports.syncHearingHistory = async (req, res) => {
       if (event.event === 'hearing.updated') await updateHearingCalendarEvent(event.hearing, result.legalCase);
       if (event.event === 'hearing.deleted') await deleteHearingCalendarEvent(event.hearing);
     }
-    events.forEach(({ event, hearingId }) => emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event, teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(hearingId), ownerId: String(result.legalCase.ownerId) } }));
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: ['nextHearingAt'] } });
+    if (result.team) {
+      events.forEach(({ event, hearingId }) => emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event, teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(hearingId), ownerId: String(result.legalCase.ownerId) } }));
+      emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: ['nextHearingAt'] } });
+    }
     res.json({ message: 'Hearing history saved', case: { ...formatCase(result.legalCase, [], req.user._id), hearingHistory: result.hearings.map(formatHearing) } });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
@@ -917,31 +923,32 @@ exports.getMyNextHearings = async (req, res) => {
 
 exports.createHearing = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
     const hearingDate = asHearingDateTime(req.body.hearingDate ?? req.body.scheduledAt, req.body.hearingTime, 'Hearing date', { required: true });
     const nextHearingDate = asHearingDateTime(req.body.nextHearingDate, req.body.nextHearingTime, 'Next hearing date');
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
-      const [hearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, hearingDate, hearingTime: req.body.hearingTime || '', courtName: trim(req.body.courtName) || legalCase.courtName, hearingDetails: trim(req.body.hearingDetails ?? req.body.notes), nextHearingDate, nextHearingTime: req.body.nextHearingTime || '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      const [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, hearingDate, hearingTime: req.body.hearingTime || '', courtName: trim(req.body.courtName) || legalCase.courtName, hearingDetails: trim(req.body.hearingDetails ?? req.body.notes), nextHearingDate, nextHearingTime: req.body.nextHearingTime || '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
       let nextHearing = null;
-      if (nextHearingDate) [nextHearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, hearingDate: nextHearingDate, hearingTime: req.body.nextHearingTime || '', courtName: hearing.courtName, hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      if (nextHearingDate) [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, hearingDate: nextHearingDate, hearingTime: req.body.nextHearingTime || '', courtName: hearing.courtName, hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
       await recomputeNextHearing(legalCase, req.user._id, session);
-      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { hearingDate, nextHearingDate }, requestId: requestId(req), session });
+      if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { hearingDate, nextHearingDate }, requestId: requestId(req), session });
       return { hearing, nextHearing, legalCase, team };
     });
     if (!result.hearing.nextHearingDate) await createHearingCalendarEvent(result.hearing, result.legalCase);
     if (result.nextHearing) await createHearingCalendarEvent(result.nextHearing, result.legalCase);
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.status(201).json({ hearing: result.hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
 exports.updateHearing = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.hearingId, 'Hearing');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
+    assertObjectId(req.params.hearingId, 'Hearing');
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
-      const hearing = await Hearing.findOne({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id }).session(session);
+      const hearing = await Hearing.findOne({ _id: req.params.hearingId, caseId: legalCase._id }).session(session);
       if (!hearing) throw domainError(404, 'Hearing not found');
       const wasActive = !hearing.nextHearingDate;
       ['courtName', 'hearingDetails'].forEach((field) => { if (req.body[field] !== undefined) hearing[field] = trim(req.body[field]); });
@@ -949,32 +956,33 @@ exports.updateHearing = async (req, res) => {
       if (req.body.nextHearingDate !== undefined) { hearing.nextHearingDate = asHearingDateTime(req.body.nextHearingDate, req.body.nextHearingTime, 'Next hearing date'); hearing.nextHearingTime = req.body.nextHearingTime || ''; }
       hearing.updatedBy = req.user._id; await hearing.save({ session }); await recomputeNextHearing(legalCase, req.user._id, session);
       let nextHearing = null;
-      if (wasActive && hearing.nextHearingDate) [nextHearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, hearingDate: hearing.nextHearingDate, hearingTime: hearing.nextHearingTime || '', courtName: hearing.courtName || legalCase.courtName, hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      if (wasActive && hearing.nextHearingDate) [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, hearingDate: hearing.nextHearingDate, hearingTime: hearing.nextHearingTime || '', courtName: hearing.courtName || legalCase.courtName, hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
       if (nextHearing) await recomputeNextHearing(legalCase, req.user._id, session);
-      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req), session });
+      if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req), session });
       return { hearing, nextHearing, legalCase, team };
     });
     if (result.nextHearing) await deleteHearingCalendarEvent(result.hearing);
     else await updateHearingCalendarEvent(result.hearing, result.legalCase);
     if (result.nextHearing) await createHearingCalendarEvent(result.nextHearing, result.legalCase);
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ hearing: result.hearing });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
 exports.deleteHearing = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team'); assertObjectId(req.params.hearingId, 'Hearing');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
+    assertObjectId(req.params.hearingId, 'Hearing');
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete', { session });
-      const hearing = await Hearing.findOneAndDelete({ _id: req.params.hearingId, caseId: legalCase._id, teamId: team._id }, { session });
+      const hearing = await Hearing.findOneAndDelete({ _id: req.params.hearingId, caseId: legalCase._id }, { session });
       if (!hearing) throw domainError(404, 'Hearing not found');
       await recomputeNextHearing(legalCase, req.user._id, session);
-      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', requestId: requestId(req), session });
+      if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.deleted', requestId: requestId(req), session });
       return { hearing, legalCase, team };
     });
     await deleteHearingCalendarEvent(result.hearing);
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Hearing deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
