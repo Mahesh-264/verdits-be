@@ -4,17 +4,27 @@ const Post = require('../models/Post');
 const User = require('../models/User');
 const { createNotification, getDisplayName } = require('../services/notificationService');
 
-const uploadImageToCloudinary = (buffer) =>
+const uploadPostAttachmentToCloudinary = (file) =>
   new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { folder: 'lawin_posts', resource_type: 'image' },
+      {
+        folder: 'lawin_posts',
+        resource_type: 'auto',
+        use_filename: true,
+        unique_filename: true,
+      },
       (error, result) => {
         if (error) return reject(error);
-        resolve(result.secure_url);
+        resolve({
+          url: result.secure_url,
+          name: file.originalname || result.original_filename || 'Attachment',
+          type: file.mimetype || result.resource_type || 'application/octet-stream',
+          resourceType: result.resource_type || 'auto',
+        });
       }
     );
 
-    streamifier.createReadStream(buffer).pipe(stream);
+    streamifier.createReadStream(file.buffer).pipe(stream);
   });
 
 const formatComment = (comment) => ({
@@ -302,7 +312,7 @@ exports.createPost = async (req, res) => {
 
     const files = Array.isArray(req.files) ? req.files.slice(0, 3) : [];
     const media = files.length
-      ? await Promise.all(files.map((file) => uploadImageToCloudinary(file.buffer)))
+      ? await Promise.all(files.map(uploadPostAttachmentToCloudinary))
       : [];
 
     const post = await Post.create({
