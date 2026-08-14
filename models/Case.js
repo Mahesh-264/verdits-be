@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const caseSchema = new mongoose.Schema(
   {
-    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true, immutable: true },
+    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
     clientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Client', required: true },
     // Read only while repairing records created before Client was normalized.
     // The repair migration unsets it and all new writes use clientId only.

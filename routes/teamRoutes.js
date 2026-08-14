@@ -17,6 +17,8 @@ router.delete('/:teamId/members/:memberId', teamController.removeMember);
 router.post('/:teamId/cases', teamController.createCase);
 router.get('/:teamId/cases/:caseId', teamController.getCaseDetails);
 router.patch('/:teamId/cases/:caseId', teamController.updateCase);
+router.put('/:teamId/cases/:caseId/status', teamController.updateCase);
+router.put('/:teamId/cases/:caseId', teamController.updateCase);
 router.delete('/:teamId/cases/:caseId', teamController.deleteCase);
 router.put('/:teamId/cases/:caseId/hearings', teamController.syncHearingHistory);
 router.get('/:teamId/next-hearings', teamController.getNextHearings);

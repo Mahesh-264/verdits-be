@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const caseDocumentSchema = new mongoose.Schema(
   {
-    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true, immutable: true },
+    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
     caseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Case', required: true, immutable: true },
     name: { type: String, required: true, trim: true, maxlength: 500 },
     url: { type: String, required: true, trim: true, maxlength: 4000 },

@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const hearingSchema = new mongoose.Schema(
   {
-    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true, immutable: true },
+    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
     caseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Case', required: true, immutable: true },
     hearingDate: { type: Date, required: true },
     // Empty means the record deliberately has no scheduled time. The datetime

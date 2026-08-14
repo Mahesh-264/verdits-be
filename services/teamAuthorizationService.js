@@ -98,8 +98,7 @@ const requireCaseAccess = async (caseId, teamId, userId, action = 'read', option
   let team = null;
   let membership = null;
 
-  if (teamId) {
-    assertObjectId(teamId, 'Team');
+  if (teamId && mongoose.isValidObjectId(teamId)) {
     team = await Team.findOne({ _id: teamId, status: 'active' }).session(options.session || null).lean();
     if (team) {
       membership = await getActiveMembership(teamId, userId, options);

@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const activityEventSchema = new mongoose.Schema(
   {
-    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true, immutable: true },
+    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
     caseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Case', default: null, immutable: true },
     actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, immutable: true },
     entityType: {

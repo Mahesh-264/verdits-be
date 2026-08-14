@@ -226,21 +226,8 @@ const getWorkspace = async (userId, selectedTeamId) => {
       return map;
     }, new Map());
 
-    const workspace = {
-      id: 'personal',
-      role: 'owner',
-      teamCode: '',
-      firmName: 'My Cases',
-      seniorLawyerName: '',
-      maxTeamSize: 1,
-      seniorLawyer: userId,
-      members: [],
-      pendingRequests: [],
-      cases: legalCases.map((legalCase) => formatCase(legalCase, documentsByCase.get(String(legalCase._id)) || [], userId)),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    return { team: workspace, teams: [], activeTeamId: null };
+    const cases = legalCases.map((legalCase) => formatCase(legalCase, documentsByCase.get(String(legalCase._id)) || [], userId));
+    return { team: null, teams: [], activeTeamId: null, cases };
   }
 
   const selected = selectedTeamId && teams.find((team) => String(team._id) === String(selectedTeamId));
@@ -574,7 +561,9 @@ exports.removeMember = async (req, res) => {
 
 exports.createCase = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team');
+    const rawTeamId = req.params.teamId;
+    const isPersonal = !rawTeamId || rawTeamId === 'personal' || rawTeamId === 'no-team' || rawTeamId === 'null' || !mongoose.isValidObjectId(rawTeamId);
+
     const title = trim(req.body.caseTitle || req.body.caseName || req.body.title);
     const details = trim(req.body.caseDetails || req.body.briefInfo || req.body.details);
     const clientName = trim(req.body.clientName);
@@ -583,68 +572,61 @@ exports.createCase = async (req, res) => {
     if (!title || !details || !clientName) throw domainError(400, 'Client name, case title, and case details are required');
     const status = trim(req.body.status) || 'new'; if (!caseStatuses.has(status)) throw domainError(400, 'Invalid case status');
     const hearingDate = asHearingDateTime(req.body.hearingDate ?? req.body.nextHearingDate, req.body.hearingTime ?? req.body.nextHearingTime, 'Hearing date');
+
     const result = await runInTransaction(async (session) => {
-      const { team } = await requireActiveMembership(req.params.teamId, req.user._id, { session });
-      const normalizedName = normalizeName(clientName);
-      let client;
-      if (req.body.clientId) {
-        assertObjectId(req.body.clientId, 'Client');
-        client = await Client.findOne({ _id: req.body.clientId, teamId: team._id }).session(session);
-        if (!client) throw domainError(404, 'Client not found');
-      } else {
-        client = await Client.findOne({ teamId: team._id, normalizedName, phone: clientPhone }).session(session);
-        if (!client) {
-          [client] = await Client.create([{ teamId: team._id, displayName: clientName, normalizedName, phone: clientPhone, address: clientAddress, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      let team = null;
+      if (!isPersonal) {
+        try {
+          ({ team } = await requireActiveMembership(rawTeamId, req.user._id, { session }));
+        } catch (e) {
+          team = null;
         }
       }
+
+      const normalizedName = normalizeName(clientName);
+      let client;
+      if (req.body.clientId && mongoose.isValidObjectId(req.body.clientId)) {
+        client = await Client.findById(req.body.clientId).session(session);
+      }
+      if (!client) {
+        const clientQuery = team ? { teamId: team._id, normalizedName, phone: clientPhone } : { createdBy: req.user._id, normalizedName, phone: clientPhone };
+        client = await Client.findOne(clientQuery).session(session);
+        if (!client) {
+          [client] = await Client.create([{ teamId: team?._id || null, displayName: clientName, normalizedName, phone: clientPhone, address: clientAddress, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+        }
+      }
+
       const startingDate = asDate(req.body.startingDate, 'Starting date');
-      const [legalCase] = await LegalCase.create([{ teamId: team._id, clientId: client._id, title, details, basicInfo: trim(req.body.basicInfo), courtName: trim(req.body.courtName), startingDate, status, ownerId: req.user._id, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      const [legalCase] = await LegalCase.create([{ teamId: team?._id || null, clientId: client._id, title, details, basicInfo: trim(req.body.basicInfo), courtName: trim(req.body.courtName), startingDate, status, ownerId: req.user._id, createdBy: req.user._id, updatedBy: req.user._id }], { session });
       let hearing = null;
       if (hearingDate) {
-        [hearing] = await Hearing.create([{ teamId: team._id, caseId: legalCase._id, courtName: trim(req.body.courtName), hearingDate, hearingTime: req.body.hearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+        [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: trim(req.body.courtName), hearingDate, hearingTime: req.body.hearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
         await recomputeNextHearing(legalCase, req.user._id, session);
       }
+
       const documents = parseDocuments(req.body.documents);
-      if (documents.length) await CaseDocument.insertMany(documents.map((document) => ({ teamId: team._id, caseId: legalCase._id, ...document, uploadedBy: req.user._id })), { session });
-      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.created', after: { title, status, clientId: client._id }, requestId: requestId(req), session });
+      if (documents.length) await CaseDocument.insertMany(documents.map((document) => ({ teamId: team?._id || null, caseId: legalCase._id, ...document, uploadedBy: req.user._id })), { session });
+
+      if (team) {
+        await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.created', after: { title, status, clientId: client._id }, requestId: requestId(req), session });
+      }
+
       return { legalCase, team, hearing };
     });
+
     if (result.hearing) await createHearingCalendarEvent(result.hearing, result.legalCase);
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(req.user._id) } });
+    if (result.team) {
+      emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(req.user._id) } });
+    }
     res.status(201).json({ message: 'Case created', case: formatCase(result.legalCase, [], req.user._id) });
   } catch (error) {
-    console.error('CREATE CASE ERROR');
-    console.error(error);
-    console.error(error.message);
-    console.error(error.stack);
-
-    if (error?.name?.startsWith('Mongo') || error?.code || error?.codeName || error?.errorLabels || error?.cause) {
-      console.error('CREATE CASE MONGODB ERROR DETAILS', {
-        code: error.code,
-        codeName: error.codeName,
-        errorLabels: error.errorLabels,
-        cause: error.cause,
-      });
-    }
-
-    if (error?.name === 'ValidationError' || error?.errors) {
-      console.error('CREATE CASE VALIDATION DETAILS', Object.fromEntries(
-        Object.entries(error.errors || {}).map(([path, detail]) => [path, {
-          kind: detail.kind,
-          message: detail.message,
-          name: detail.name,
-          value: detail.value,
-        }])
-      ));
-    }
-
     res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
 exports.updateCase = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
       const allowed = { title: 'caseTitle', details: 'caseDetails', basicInfo: 'basicInfo', courtName: 'courtName', status: 'status' };
@@ -661,28 +643,30 @@ exports.updateCase = async (req, res) => {
         const clientBefore = { phone: client.phone, address: client.address };
         if (req.body.clientPhone !== undefined) client.phone = trim(req.body.clientPhone);
         if (req.body.clientAddress !== undefined) client.address = trim(req.body.clientAddress);
-        if (client.isModified('phone') || client.isModified('address')) { clientChanged = true; client.updatedBy = req.user._id; await client.save({ session }); await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'client', entityId: client._id, action: 'client.updated', changedFields: Object.keys(client.modifiedPaths()).filter((field) => ['phone', 'address'].includes(field)), before: clientBefore, after: { phone: client.phone, address: client.address }, requestId: requestId(req), session }); }
+        if (client.isModified('phone') || client.isModified('address')) { clientChanged = true; client.updatedBy = req.user._id; await client.save({ session }); if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'client', entityId: client._id, action: 'client.updated', changedFields: Object.keys(client.modifiedPaths()).filter((field) => ['phone', 'address'].includes(field)), before: clientBefore, after: { phone: client.phone, address: client.address }, requestId: requestId(req), session }); }
       }
       if (!changedFields.length && !clientChanged) throw domainError(400, 'No changes were supplied');
-      if (changedFields.length) { legalCase.updatedBy = req.user._id; await legalCase.save({ session }); await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields, before, after: changedFields.reduce((data, field) => ({ ...data, [field]: legalCase[field] }), {}), requestId: requestId(req), session }); }
+      if (changedFields.length) { legalCase.updatedBy = req.user._id; await legalCase.save({ session }); if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.updated', changedFields, before, after: changedFields.reduce((data, field) => ({ ...data, [field]: legalCase[field] }), {}), requestId: requestId(req), session }); }
       return { legalCase, team, client, clientChanged, changedFields };
     });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: result.changedFields } });
-    if (result.changedFields.includes('status')) {
-      emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.status.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), status: result.legalCase.status } });
+    if (result.team) {
+      emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), changedFields: result.changedFields } });
+      if (result.changedFields.includes('status')) {
+        emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.status.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId), status: result.legalCase.status } });
+      }
+      if (result.clientChanged) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'client.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), clientId: String(result.client._id), ownerId: String(result.legalCase.ownerId) } });
     }
-    if (result.clientChanged) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'client.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), clientId: String(result.client._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Case updated', case: formatCase(result.legalCase, [], req.user._id) });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
 exports.deleteCase = async (req, res) => {
   try {
-    assertObjectId(req.params.teamId, 'Team');
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
     // References to Calendar events live on Hearing documents, so collect and
     // clean those exact IDs before the transaction removes the hearings.
     const { legalCase: calendarCase } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete');
-    const calendarHearings = await Hearing.find({ teamId: calendarCase.teamId, caseId: calendarCase._id, googleEventId: { $exists: true, $ne: null } });
+    const calendarHearings = await Hearing.find({ caseId: calendarCase._id, googleEventId: { $exists: true, $ne: null } });
     await deleteCalendarEventsForCase(calendarHearings);
     const result = await runInTransaction(async (session) => {
       const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'delete', { session });
@@ -690,10 +674,10 @@ exports.deleteCase = async (req, res) => {
       // Retain one immutable deletion audit record while removing historical
       // events tied to a record that no longer exists.
       await ActivityEvent.deleteMany({ caseId: legalCase._id }).session(session);
-      await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.deleted', before: { title: legalCase.title, ownerId: legalCase.ownerId }, requestId: requestId(req), session });
+      if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'case', entityId: legalCase._id, action: 'case.deleted', before: { title: legalCase.title, ownerId: legalCase.ownerId }, requestId: requestId(req), session });
       return { legalCase, team };
     });
-    emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId) } });
+    if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'case.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Case deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };

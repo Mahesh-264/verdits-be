@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const clientSchema = new mongoose.Schema(
   {
-    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true, immutable: true },
+    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
     type: { type: String, enum: ['individual', 'organization'], default: 'individual' },
     displayName: { type: String, required: true, trim: true, maxlength: 200 },
     normalizedName: { type: String, required: true, trim: true, lowercase: true, maxlength: 200 },
