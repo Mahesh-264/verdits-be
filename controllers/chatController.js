@@ -94,14 +94,16 @@ exports.uploadToCloudinary = uploadToCloudinary;
 // 🟢 1. SEND MESSAGE
 exports.sendMessage = async (req, res) => {
   try {
-    const { receiverId, messageType, content } = req.body;
+    const { receiverId, messageType, content, contextId, contextLabel } = req.body;
     const newMessageData = {
       sender: req.user.id,
       receiver: receiverId,
       senderRole: req.user.role,
       messageType: messageType || 'text',
       content,
-      timestamp: new Date()
+      timestamp: new Date(),
+      contextId: contextId ? String(contextId) : null,
+      contextLabel: contextLabel ? String(contextLabel).slice(0, 300) : null,
     };
 
     if (req.file) {
@@ -198,9 +200,10 @@ exports.getHistory = async (req, res) => {
   try {
     const myId = new mongoose.Types.ObjectId(req.user.id);
     const partnerId = new mongoose.Types.ObjectId(req.params.partnerId);
-    const messages = await Message.find({
-      $or: [{ sender: myId, receiver: partnerId }, { sender: partnerId, receiver: myId }]
-    }).sort({ timestamp: 1 });
+    const contextId = req.query.contextId ? String(req.query.contextId) : null;
+    const query = { $or: [{ sender: myId, receiver: partnerId }, { sender: partnerId, receiver: myId }] };
+    if (contextId) query.contextId = contextId;
+    const messages = await Message.find(query).sort({ timestamp: 1 });
     res.status(200).json({ success: true, messages });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

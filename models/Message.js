@@ -40,6 +40,9 @@ const MessageSchema = new mongoose.Schema({
   },
   timestamp: { type: Date, default: Date.now },
   read: { type: Boolean, default: false },
+  // Optional context for embedded case/hearing conversations.
+  contextId: { type: String, trim: true, default: null },
+  contextLabel: { type: String, trim: true, default: null },
 });
 
 module.exports = mongoose.model('Message', MessageSchema);
