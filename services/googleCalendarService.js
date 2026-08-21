@@ -76,6 +76,9 @@ const getCalendar = (refreshToken) => {
 };
 
 const hearingEventResource = ({ hearing, legalCase, client, lawyer }) => {
+  if (!/^\d{2}:\d{2}$/.test(String(hearing.hearingTime || '').trim())) {
+    throw new Error('Cannot create a timed Google Calendar event without a hearing time');
+  }
   const start = new Date(hearing.hearingDate);
   const end = new Date(start.getTime() + (60 * 60 * 1000));
   const caseName = legalCase.title || 'Case';
