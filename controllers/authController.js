@@ -3309,6 +3309,50 @@ exports.deleteLawyerInternship = async (req, res) => {
   }
 };
 
+// 17E-A. DELETE JAM SESSION
+exports.deleteLawyerJamSession = async (req, res) => {
+  try {
+    const lawyer = await User.findById(req.user._id);
+
+    if (!lawyer || lawyer.role !== 'lawyer') {
+      return res.status(403).json({ message: 'Only lawyers can manage jam sessions' });
+    }
+
+    const jamSessions = lawyer.lawyerProfile?.jamSessions || [];
+    const sessionIndex = jamSessions.findIndex(
+      (session) => String(session._id) === String(req.params.sessionId)
+    );
+
+    if (sessionIndex < 0) {
+      return res.status(404).json({ message: 'Jam session not found' });
+    }
+
+    const [removedSession] = jamSessions.splice(sessionIndex, 1);
+    lawyer.markModified('lawyerProfile');
+    await lawyer.save();
+
+    // Keep student profiles consistent with the deleted session. A legacy
+    // student record must not turn an already-completed lawyer deletion into
+    // a failed request.
+    try {
+      await User.updateMany(
+        { 'studentProfile.joinedJamSessions.sessionId': removedSession._id },
+        { $pull: { 'studentProfile.joinedJamSessions': { sessionId: removedSession._id } } }
+      );
+    } catch (cleanupError) {
+      console.error('Unable to remove deleted jam session from student profiles:', cleanupError);
+    }
+
+    res.json({
+      message: 'Jam session deleted',
+      deletedSessionId: req.params.sessionId,
+      stats: getLawyerInteractionStats(lawyer),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // 17F. UPDATE APPLICANT STATUS
 exports.updateInternshipApplicantStatus = async (req, res) => {
   try {
