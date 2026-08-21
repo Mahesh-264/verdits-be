@@ -17,7 +17,7 @@ const eventResourceFor = async (hearing, legalCase) => {
     legalCase.clientId ? Client.findById(legalCase.clientId).lean() : null,
   ]);
   if (!lawyer?.googleCalendar?.connected || !lawyer.googleCalendar.refreshToken) return null;
-  if (hearing.hearingTime === '') {
+  if (!String(hearing.hearingTime || '').trim()) {
     console.warn('Google Calendar event skipped because hearing time is empty', { hearingId: String(hearing._id) });
     return null;
   }
@@ -39,7 +39,7 @@ const createHearingCalendarEvent = async (hearing, legalCase) => {
 
 const updateHearingCalendarEvent = async (hearing, legalCase) => {
   if (!hearing.googleEventId) return;
-  if (hearing.hearingTime === '') {
+  if (!String(hearing.hearingTime || '').trim()) {
     console.log('Calendar Event Removed Because Hearing Time Was Cleared', { hearingId: String(hearing._id) });
     return deleteHearingCalendarEvent(hearing);
   }
