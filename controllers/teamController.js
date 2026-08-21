@@ -783,6 +783,7 @@ exports.getNextHearings = async (req, res) => {
     assertObjectId(req.params.teamId, 'Team');
     const { team, membership } = await requireActiveMembership(req.params.teamId, req.user._id);
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
+    const now = new Date();
     const caseScope = getAuthorizedTeamCaseScope({
       teamId: team._id,
       userId: req.user._id,
@@ -797,7 +798,7 @@ exports.getNextHearings = async (req, res) => {
       ? await Hearing.find({
         teamId: team._id,
         caseId: { $in: caseIds },
-        hearingDate: { $exists: true, $ne: null },
+        hearingDate: { $gte: now },
         nextHearingDate: null,
         isHistorical: { $ne: true },
       }).sort({ hearingDate: 1, _id: 1 }).lean()
@@ -856,11 +857,7 @@ exports.getMyNextHearings = async (req, res) => {
       ? Hearing.find({
         caseId: { $in: caseIds },
         isHistorical: { $ne: true },
-        $or: [
-          { hearingDate: { $gte: now }, nextHearingDate: null },
-          { nextHearingDate: { $gte: now } },
-          { hearingDate: { $exists: true, $ne: null } },
-        ],
+        hearingDate: { $gte: now },
       }).sort({ hearingDate: 1, _id: 1 }).lean()
       : []);
     const hearingsByCaseId = new Map();
@@ -887,6 +884,11 @@ exports.getMyNextHearings = async (req, res) => {
           hearingTime: '',
           courtName: legalCase.courtName,
         } : null);
+        
+        if (upcomingHearing && new Date(upcomingHearing.hearingDate) < now) {
+          return null;
+        }
+
         return upcomingHearing ? { legalCase, upcomingHearing } : null;
       })
       .filter(Boolean)
