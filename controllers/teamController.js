@@ -8,6 +8,7 @@ const LegalCase = require('../models/Case');
 const Hearing = require('../models/Hearing');
 const CaseDocument = require('../models/CaseDocument');
 const ActivityEvent = require('../models/ActivityEvent');
+const CaseMessage = require('../models/CaseMessage');
 const User = require('../models/User');
 const { createNotification, getDisplayName } = require('../services/notificationService');
 const { recordActivity } = require('../services/activityService');
@@ -49,13 +50,23 @@ const asDate = (value, label, { required = false } = {}) => {
   if (Number.isNaN(date.getTime())) throw domainError(400, `Invalid ${label.toLowerCase()}`);
   return date;
 };
+const asHearingTime = (value, label = 'Hearing time') => {
+  const time = trim(value);
+  if (!time) return '';
+  if (!/^\d{2}:\d{2}$/.test(time)) throw domainError(400, `Invalid ${label.toLowerCase()}`);
+  const [hours, minutes] = time.split(':').map(Number);
+  if (hours > 23 || minutes > 59) throw domainError(400, `Invalid ${label.toLowerCase()}`);
+  return time;
+};
 const asHearingDateTime = (dateValue, timeValue, label, { required = false } = {}) => {
   if (dateValue === undefined || dateValue === null || dateValue === '') {
     if (required) throw domainError(400, `${label} is required`);
     return null;
   }
-  if (!timeValue && /T/.test(String(dateValue))) return asDate(dateValue, label, { required });
-  const time = /^\d{2}:\d{2}$/.test(String(timeValue || '')) ? timeValue : '00:00';
+  // The Date field stores the hearing day; hearingTime is the sole authority
+  // for its clock time. An empty time must therefore persist as midnight-only
+  // date data, never an inherited timestamp from an ISO date string.
+  const time = asHearingTime(timeValue, `${label} time`) || '00:00';
   const date = new Date(`${String(dateValue).slice(0, 10)}T${time}:00+05:30`);
   if (Number.isNaN(date.getTime())) throw domainError(400, `Invalid ${label.toLowerCase()}`);
   return date;
@@ -73,11 +84,11 @@ const formatHearing = (hearing) => ({
   id: String(hearing._id),
   courtName: hearing.courtName || '',
   hearingDate: hearing.hearingDate,
-  hearingTime: hearing.hearingTime ?? (hearing.hearingDate ? dateTimeParts(hearing.hearingDate).time : ''),
+  hearingTime: trim(hearing.hearingTime),
   hearingDetails: hearing.hearingDetails || '',
   nextHearing: hearing.nextHearingDate || null,
   nextHearingDate: hearing.nextHearingDate || null,
-  nextHearingTime: hearing.nextHearingTime ?? (hearing.nextHearingDate ? dateTimeParts(hearing.nextHearingDate).time : ''),
+  nextHearingTime: trim(hearing.nextHearingTime),
   isHistorical: Boolean(hearing.isHistorical),
   createdAt: hearing.createdAt,
   updatedAt: hearing.updatedAt,
@@ -186,7 +197,7 @@ const formatLegacyEmbeddedCase = (legacyCase, team, viewerId) => {
     startingDate: legacyCase.startingDate || legacyCase.createdAt || null,
     nextHearingDate: hearingDate,
     hearingDate,
-    hearingTime: hearingDate ? dateTimeParts(hearingDate).time : '',
+    hearingTime: trim(legacyCase.hearingTime),
     documents: [],
     status: legacyCase.status,
     addedBy: legacyCase.addedBy || null,
@@ -599,7 +610,7 @@ exports.createCase = async (req, res) => {
       const [legalCase] = await LegalCase.create([{ teamId: team?._id || null, clientId: client._id, title, details, basicInfo: trim(req.body.basicInfo), courtName: trim(req.body.courtName), startingDate, status, ownerId: req.user._id, createdBy: req.user._id, updatedBy: req.user._id }], { session });
       let hearing = null;
       if (hearingDate) {
-        [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: trim(req.body.courtName), hearingDate, hearingTime: req.body.hearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+        [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: trim(req.body.courtName), hearingDate, hearingTime: asHearingTime(req.body.hearingTime), hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
         await recomputeNextHearing(legalCase, req.user._id, session);
       }
 
@@ -724,28 +735,28 @@ exports.syncHearingHistory = async (req, res) => {
           const scheduleNextHearing = !hearing.nextHearingDate && nextHearingDate;
           hearing.courtName = trim(row.courtName);
           hearing.hearingDate = hearingDate;
-          hearing.hearingTime = row.hearingTime || '';
+          hearing.hearingTime = asHearingTime(row.hearingTime);
           hearing.hearingDetails = trim(row.hearingDetails);
           hearing.nextHearingDate = nextHearingDate;
-          hearing.nextHearingTime = row.nextHearingTime || '';
+          hearing.nextHearingTime = asHearingTime(row.nextHearingTime, 'Next hearing time');
           hearing.updatedBy = req.user._id;
           await hearing.save({ session });
           if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', changedFields: ['courtName', 'hearingDate', 'hearingDetails', 'nextHearingDate'], before, after: hearing.toObject(), requestId: requestId(req), session });
           const event = { event: 'hearing.updated', hearingId: hearing._id, hearing };
           events.push(event); calendarEvents.push(scheduleNextHearing ? { event: 'hearing.deleted', hearingId: hearing._id, hearing } : event);
           if (scheduleNextHearing) {
-            const [newHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: hearing.courtName || legalCase.courtName, hearingDate: nextHearingDate, hearingTime: row.nextHearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+            const [newHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: hearing.courtName || legalCase.courtName, hearingDate: nextHearingDate, hearingTime: asHearingTime(row.nextHearingTime, 'Next hearing time'), hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
             const nextEvent = { event: 'hearing.created', hearingId: newHearing._id, hearing: newHearing };
             events.push(nextEvent); calendarEvents.push(nextEvent);
           }
         } else {
           const isManualHistory = row.isManualHistory === true;
-          const [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: trim(row.courtName) || legalCase.courtName, hearingDate, hearingTime: row.hearingTime || '', hearingDetails: trim(row.hearingDetails), nextHearingDate, nextHearingTime: row.nextHearingTime || '', isHistorical: isManualHistory, createdBy: req.user._id, updatedBy: req.user._id }], { session });
+          const [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: trim(row.courtName) || legalCase.courtName, hearingDate, hearingTime: asHearingTime(row.hearingTime), hearingDetails: trim(row.hearingDetails), nextHearingDate, nextHearingTime: asHearingTime(row.nextHearingTime, 'Next hearing time'), isHistorical: isManualHistory, createdBy: req.user._id, updatedBy: req.user._id }], { session });
           if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: hearing.toObject(), requestId: requestId(req), session });
           const event = { event: 'hearing.created', hearingId: hearing._id, hearing };
           events.push(event); calendarEvents.push(event);
           if (!isManualHistory && nextHearingDate) {
-            const [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: hearing.courtName, hearingDate: nextHearingDate, hearingTime: row.nextHearingTime || '', hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+            const [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, courtName: hearing.courtName, hearingDate: nextHearingDate, hearingTime: asHearingTime(row.nextHearingTime, 'Next hearing time'), hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
             const nextEvent = { event: 'hearing.created', hearingId: nextHearing._id, hearing: nextHearing };
             events.push(nextEvent); calendarEvents.push(nextEvent);
           }
@@ -799,6 +810,200 @@ exports.getNextHearings = async (req, res) => {
         teamId: team._id,
         caseId: { $in: caseIds },
         hearingDate: { $gte: now },
+        nextHearingDate: null,
+        isHistorical: { $ne: true },
+      }).sort({ hearingDate: 1, _id: 1 }).lean()
+      : [];
+    // A case can have historical hearings. Retain only its nearest qualifying
+    // one so every eligible case has exactly one Next Hearings card.
+    const nextHearingByCaseId = new Map();
+    hearings.forEach((hearing) => {
+      const caseId = String(hearing.caseId);
+      if (!nextHearingByCaseId.has(caseId)) nextHearingByCaseId.set(caseId, hearing);
+    });
+    const eligibleCases = legalCases
+      .filter((legalCase) => nextHearingByCaseId.has(String(legalCase._id)))
+      .map((legalCase) => ({ ...legalCase, activeHearing: nextHearingByCaseId.get(String(legalCase._id)), nextHearingAt: nextHearingByCaseId.get(String(legalCase._id)).hearingDate }))
+      .sort((left, right) => new Date(left.activeHearing.hearingDate) - new Date(right.activeHearing.hearingDate))
+      .slice(0, limit);
+    res.json({ cases: eligibleCases.map((legalCase) => ({ ...formatCase(legalCase, [], req.user._id), hearingDate: legalCase.activeHearing.hearingDate, hearingTime: trim(legalCase.activeHearing.hearingTime), courtName: legalCase.activeHearing.courtName || legalCase.courtName, teamName: team.firmName, teamCode: team.teamCode })), page: 1, limit });
+  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+// Dashboard scope: all active memberships, but only cases owned by the
+// authenticated lawyer. This is deliberately not tied to the My Team switcher.
+exports.getMyNextHearings = async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
+    const now = new Date();
+    const activeMemberships = await TeamMember.find({ userId: req.user._id, status: 'active' }).select('teamId').lean();
+    const membershipTeamIds = activeMemberships.map((membership) => membership.teamId);
+    const activeTeams = membershipTeamIds.length
+      ? await Team.find({ _id: { $in: membershipTeamIds }, status: 'active' }).select('_id').lean()
+      : [];
+    const activeTeamIds = activeTeams.map((team) => team._id);
+    const [legalCases, legacyTeams] = await Promise.all([
+      LegalCase.find(getOwnedCaseScopeForActiveTeams({ teamIds: activeTeamIds, userId: req.user._id }))
+        .populate('clientId', 'displayName phone address')
+        .populate('teamId', 'firmName teamCode')
+        .lean(),
+      activeTeamIds.length
+        ? Team.find({
+          _id: { $in: activeTeamIds },
+          status: 'active',
+          cases: {
+            $elemMatch: {
+              addedBy: req.user._id,
+              hearingDate: { $gte: now },
+              status: { $ne: 'closed' },
+            },
+          },
+        })
+          .select('firmName teamCode cases')
+          .lean()
+        : [],
+    ]);
+    const caseIds = legalCases.map((legalCase) => legalCase._id);
+    const hearings = await (caseIds.length
+      ? Hearing.find({
+        caseId: { $in: caseIds },
+        isHistorical: { $ne: true },
+        $or: [
+          { hearingDate: { $gte: now }, nextHearingDate: null },
+          { nextHearingDate: { $gte: now } },
+          { hearingDate: { $exists: true, $ne: null } },
+        ],
+      }).sort({ hearingDate: 1, _id: 1 }).lean()
+      : []);
+    const hearingsByCaseId = new Map();
+    hearings.forEach((hearing) => {
+      const key = String(hearing.caseId);
+      if (!hearingsByCaseId.has(key)) hearingsByCaseId.set(key, []);
+      hearingsByCaseId.get(key).push(hearing);
+    });
+    const migratedLegacyKeys = new Set(
+      legalCases
+        .filter((legalCase) => legalCase.legacyTeamId && legalCase.legacyCaseId)
+        .map((legalCase) => `${String(legalCase.legacyTeamId)}:${String(legalCase.legacyCaseId)}`)
+    );
+    const normalizedCases = legalCases
+      .map((legalCase) => {
+        const caseHearings = hearingsByCaseId.get(String(legalCase._id)) || [];
+        const activeHearing = caseHearings.find((hearing) => !hearing.nextHearingDate && hearing.isHistorical !== true);
+        const fallbackUpcoming = caseHearings
+          .filter((hearing) => hearing.nextHearingDate && new Date(hearing.nextHearingDate) >= now)
+          .sort((left, right) => new Date(left.nextHearingDate) - new Date(right.nextHearingDate))[0];
+        const anyHearing = caseHearings[0];
+        const upcomingHearing = activeHearing || fallbackUpcoming || anyHearing || (legalCase.nextHearingAt || legalCase.startingDate ? {
+          hearingDate: legalCase.nextHearingAt || legalCase.startingDate,
+          hearingTime: '',
+          courtName: legalCase.courtName,
+        } : null);
+        return upcomingHearing ? { legalCase, upcomingHearing } : null;
+      })
+      .filter(Boolean)
+      .map((legalCase) => {
+        const { legalCase: record, upcomingHearing } = legalCase;
+        const team = record.teamId && typeof record.teamId === 'object' ? record.teamId : null;
+        return {
+          ...formatCase(record, [], req.user._id),
+          hearingDate: upcomingHearing.hearingDate,
+          hearingTime: trim(upcomingHearing.hearingTime),
+          courtName: upcomingHearing.courtName || record.courtName,
+          teamId: team?._id ? String(team._id) : (record.teamId ? String(record.teamId) : ''),
+          teamName: team?.firmName || 'No team',
+          teamCode: team?.teamCode || 'Not added',
+        };
+      });
+    const legacyCases = legacyTeams.flatMap((team) => (
+      Array.isArray(team.cases) ? team.cases : []
+    ).filter((legacyCase) => {
+      if (String(legacyCase.addedBy?._id || legacyCase.addedBy || '') !== String(req.user._id)) return false;
+      if (String(legacyCase.status || '').toLowerCase() === 'closed') return false;
+      const hearingDateValue = legacyCase.nextHearingDate || legacyCase.hearingDate;
+      if (!hearingDateValue) return false;
+      const hearingDate = new Date(hearingDateValue);
+      if (Number.isNaN(hearingDate.getTime()) || hearingDate < now) return false;
+      return !migratedLegacyKeys.has(`${String(team._id)}:${String(legacyCase._id)}`);
+    }).map((legacyCase) => formatLegacyEmbeddedCase({
+      ...legacyCase,
+      hearingDate: legacyCase.nextHearingDate || legacyCase.hearingDate,
+    }, team, req.user._id)));
+    const cases = [...normalizedCases, ...legacyCases]
+      .sort((left, right) => new Date(left.hearingDate) - new Date(right.hearingDate))
+      .slice(0, limit);
+    res.json({ cases, page: 1, limit });
+  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+exports.createHearing = async (req, res) => {
+  try {
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
+    const hearingDate = asHearingDateTime(req.body.hearingDate ?? req.body.scheduledAt, req.body.hearingTime, 'Hearing date', { required: true });
+    const nextHearingDate = asHearingDateTime(req.body.nextHearingDate, req.body.nextHearingTime, 'Next hearing date');
+    const result = await runInTransaction(async (session) => {
+      const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
+      const [hearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, hearingDate, hearingTime: asHearingTime(req.body.hearingTime), courtName: trim(req.body.courtName) || legalCase.courtName, hearingDetails: trim(req.body.hearingDetails ?? req.body.notes), nextHearingDate, nextHearingTime: asHearingTime(req.body.nextHearingTime, 'Next hearing time'), createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      let nextHearing = null;
+      if (nextHearingDate) [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, hearingDate: nextHearingDate, hearingTime: asHearingTime(req.body.nextHearingTime, 'Next hearing time'), courtName: hearing.courtName, hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      await recomputeNextHearing(legalCase, req.user._id, session);
+      if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.created', after: { hearingDate, nextHearingDate }, requestId: requestId(req), session });
+      return { hearing, nextHearing, legalCase, team };
+    });
+    if (!result.hearing.nextHearingDate) await createHearingCalendarEvent(result.hearing, result.legalCase);
+    if (result.nextHearing) await createHearingCalendarEvent(result.nextHearing, result.legalCase);
+    if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.created', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    res.status(201).json({ hearing: result.hearing });
+  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+exports.updateHearing = async (req, res) => {
+  try {
+    if (req.params.teamId && mongoose.isValidObjectId(req.params.teamId)) assertObjectId(req.params.teamId, 'Team');
+    assertObjectId(req.params.hearingId, 'Hearing');
+    const result = await runInTransaction(async (session) => {
+      const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'write', { session });
+      const hearing = await Hearing.findOne({ _id: req.params.hearingId, caseId: legalCase._id }).session(session);
+      if (!hearing) throw domainError(404, 'Hearing not found');
+      const wasActive = !hearing.nextHearingDate;
+      ['courtName', 'hearingDetails'].forEach((field) => { if (req.body[field] !== undefined) hearing[field] = trim(req.body[field]); });
+      if (req.body.hearingDate !== undefined || req.body.scheduledAt !== undefined) { hearing.hearingDate = asHearingDateTime(req.body.hearingDate ?? req.body.scheduledAt, req.body.hearingTime, 'Hearing date', { required: true }); hearing.hearingTime = asHearingTime(req.body.hearingTime); }
+      if (req.body.nextHearingDate !== undefined) { hearing.nextHearingDate = asHearingDateTime(req.body.nextHearingDate, req.body.nextHearingTime, 'Next hearing date'); hearing.nextHearingTime = asHearingTime(req.body.nextHearingTime, 'Next hearing time'); }
+      hearing.updatedBy = req.user._id; await hearing.save({ session }); await recomputeNextHearing(legalCase, req.user._id, session);
+      let nextHearing = null;
+      if (wasActive && hearing.nextHearingDate) [nextHearing] = await Hearing.create([{ teamId: team?._id || null, caseId: legalCase._id, hearingDate: hearing.nextHearingDate, hearingTime: asHearingTime(hearing.nextHearingTime, 'Next hearing time'), courtName: hearing.courtName || legalCase.courtName, hearingDetails: '', nextHearingDate: null, nextHearingTime: '', createdBy: req.user._id, updatedBy: req.user._id }], { session });
+      if (nextHearing) await recomputeNextHearing(legalCase, req.user._id, session);
+      if (team) await recordActivity({ teamId: team._id, caseId: legalCase._id, actorId: req.user._id, entityType: 'hearing', entityId: hearing._id, action: 'hearing.updated', requestId: requestId(req), session });
+      return { hearing, nextHearing, legalCase, team };
+    });
+    if (result.nextHearing) await deleteHearingCalendarEvent(result.hearing);
+    else await updateHearingCalendarEvent(result.hearing, result.legalCase);
+    if (result.nextHearing) await createHearingCalendarEvent(result.nextHearing, result.legalCase);
+    if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.updated', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
+    res.json({ hearing: result.hearing });
+  } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+exports.getNextHearings = async (req, res) => {
+  try {
+    assertObjectId(req.params.teamId, 'Team');
+    const { team, membership } = await requireActiveMembership(req.params.teamId, req.user._id);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 200);
+    const caseScope = getAuthorizedTeamCaseScope({
+      teamId: team._id,
+      userId: req.user._id,
+      membership,
+      includeClosed: false,
+      includeArchived: false,
+    });
+    const legalCases = await LegalCase.find(caseScope)
+      .populate('clientId', 'displayName phone address').lean();
+    const caseIds = legalCases.map((legalCase) => legalCase._id);
+    const hearings = caseIds.length
+      ? await Hearing.find({
+        teamId: team._id,
+        caseId: { $in: caseIds },
+        hearingDate: { $exists: true, $ne: null },
         nextHearingDate: null,
         isHistorical: { $ne: true },
       }).sort({ hearingDate: 1, _id: 1 }).lean()
@@ -990,4 +1195,227 @@ exports.deleteHearing = async (req, res) => {
     if (result.team) emitTeamEvent({ io: req.app.get('socketio'), recipientIds: caseRecipients(result.legalCase, result.team), event: 'hearing.deleted', teamId: result.team._id, payload: { caseId: String(result.legalCase._id), hearingId: String(result.hearing._id), ownerId: String(result.legalCase.ownerId) } });
     res.json({ message: 'Hearing deleted' });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
+};
+
+exports.getCaseMessages = async (req, res) => {
+  try {
+    const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'read');
+    const messages = await CaseMessage.find({ caseId: legalCase._id })
+      .populate('senderId', 'firstName lastName role profileImage lawyerProfile.specialization')
+      .populate('receiverId', 'firstName lastName role profileImage')
+      .sort({ createdAt: 1 })
+      .lean();
+
+    await CaseMessage.updateMany(
+      { caseId: legalCase._id, senderId: { $ne: req.user._id }, readBy: { $ne: req.user._id } },
+      { $addToSet: { readBy: req.user._id } }
+    );
+
+    const participantMap = new Map();
+
+    const ownerId = legalCase.ownerId || legalCase.createdBy || legalCase.addedBy;
+    if (ownerId) {
+      const ownerUser = await User.findById(ownerId).select('firstName lastName role lawyerProfile.specialization').lean();
+      if (ownerUser) {
+        participantMap.set(String(ownerUser._id), {
+          id: String(ownerUser._id),
+          name: `${ownerUser.firstName || ''} ${ownerUser.lastName || ''}`.trim() || 'Case Lawyer',
+          role: ownerUser.role || 'lawyer',
+          isCaseOwner: true,
+        });
+      }
+    }
+
+    if (team) {
+      const teamOwnerId = team.ownerId || team.owner;
+      if (teamOwnerId && !participantMap.has(String(teamOwnerId))) {
+        const teamOwner = await User.findById(teamOwnerId).select('firstName lastName role lawyerProfile.specialization').lean();
+        if (teamOwner) {
+          participantMap.set(String(teamOwner._id), {
+            id: String(teamOwner._id),
+            name: `${teamOwner.firstName || ''} ${teamOwner.lastName || ''}`.trim() || 'Head Lawyer',
+            role: teamOwner.role || 'lawyer',
+            isTeamOwner: true,
+          });
+        }
+      }
+
+      const activeMembers = await TeamMember.find({ teamId: team._id, status: 'active' }).populate('userId', 'firstName lastName role').lean();
+      for (const m of activeMembers) {
+        if (m.userId && !participantMap.has(String(m.userId._id))) {
+          participantMap.set(String(m.userId._id), {
+            id: String(m.userId._id),
+            name: `${m.userId.firstName || ''} ${m.userId.lastName || ''}`.trim() || 'Team Member',
+            role: m.userId.role || 'lawyer',
+          });
+        }
+      }
+    }
+
+    const participants = Array.from(participantMap.values());
+    const caseTitle = legalCase.title || legalCase.caseName || 'Case Chat';
+
+    res.json({
+      success: true,
+      caseTitle,
+      messages: messages.map((m) => ({
+        id: String(m._id),
+        _id: String(m._id),
+        caseId: String(m.caseId),
+        senderId: m.senderId ? { id: String(m.senderId._id), name: `${m.senderId.firstName || ''} ${m.senderId.lastName || ''}`.trim(), role: m.senderId.role } : null,
+        receiverId: m.receiverId ? { id: String(m.receiverId._id), name: `${m.receiverId.firstName || ''} ${m.receiverId.lastName || ''}`.trim(), role: m.receiverId.role } : null,
+        message: m.message,
+        hearingRef: m.hearingRef || null,
+        createdAt: m.createdAt,
+      })),
+      participants,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+exports.sendCaseMessage = async (req, res) => {
+  try {
+    const { legalCase, team } = await requireCaseAccess(req.params.caseId, req.params.teamId, req.user._id, 'read');
+    const { message, receiverId, hearingRef } = req.body;
+    if (!message || !message.trim()) {
+      throw domainError(400, 'Message text is required');
+    }
+
+    const senderIdStr = String(req.user._id);
+    const caseOwnerId = String(legalCase.ownerId || legalCase.createdBy || legalCase.addedBy || '');
+    const teamOwnerId = team ? String(team.ownerId || team.owner || '') : '';
+
+    let targetRecipientId = receiverId && mongoose.isValidObjectId(receiverId) && String(receiverId) !== senderIdStr
+      ? String(receiverId)
+      : null;
+
+    if (!targetRecipientId) {
+      if (senderIdStr === caseOwnerId && teamOwnerId && teamOwnerId !== senderIdStr) {
+        targetRecipientId = teamOwnerId;
+      } else if (senderIdStr === teamOwnerId && caseOwnerId && caseOwnerId !== senderIdStr) {
+        targetRecipientId = caseOwnerId;
+      } else if (caseOwnerId && caseOwnerId !== senderIdStr) {
+        targetRecipientId = caseOwnerId;
+      } else if (teamOwnerId && teamOwnerId !== senderIdStr) {
+        targetRecipientId = teamOwnerId;
+      }
+    }
+
+    const createdMsg = await CaseMessage.create({
+      caseId: legalCase._id,
+      teamId: team?._id || legalCase.teamId || null,
+      senderId: req.user._id,
+      receiverId: targetRecipientId && mongoose.isValidObjectId(targetRecipientId) ? targetRecipientId : null,
+      message: message.trim(),
+      hearingRef: hearingRef || null,
+      readBy: [req.user._id],
+    });
+
+    const populated = await CaseMessage.findById(createdMsg._id)
+      .populate('senderId', 'firstName lastName role')
+      .populate('receiverId', 'firstName lastName role')
+      .lean();
+
+    const formattedMsg = {
+      id: String(populated._id),
+      _id: String(populated._id),
+      caseId: String(populated.caseId),
+      senderId: populated.senderId ? { id: String(populated.senderId._id), name: `${populated.senderId.firstName || ''} ${populated.senderId.lastName || ''}`.trim(), role: populated.senderId.role } : null,
+      receiverId: populated.receiverId ? { id: String(populated.receiverId._id), name: `${populated.receiverId.firstName || ''} ${populated.receiverId.lastName || ''}`.trim(), role: populated.receiverId.role } : null,
+      message: populated.message,
+      hearingRef: populated.hearingRef || null,
+      createdAt: populated.createdAt,
+    };
+
+    const io = req.app.get('socketio');
+    if (io) {
+      io.emit(`case:${legalCase._id}:message`, formattedMsg);
+      if (targetRecipientId) {
+        io.to(String(targetRecipientId)).emit('case.chat.message', formattedMsg);
+      }
+    }
+
+    // Determine Intermediate Lawyer for Junior / Case Owner if available
+    let intermediateOwnerId = null;
+    if (team && caseOwnerId) {
+      if (legalCase.supervisorId && String(legalCase.supervisorId) !== caseOwnerId && String(legalCase.supervisorId) !== teamOwnerId) {
+        intermediateOwnerId = String(legalCase.supervisorId);
+      } else {
+        const memberRecord = await TeamMember.findOne({ teamId: team._id, userId: caseOwnerId, status: 'active' }).lean();
+        if (memberRecord && memberRecord.addedBy) {
+          const addedById = String(memberRecord.addedBy);
+          if (addedById !== caseOwnerId && addedById !== teamOwnerId) {
+            intermediateOwnerId = addedById;
+          }
+        }
+      }
+    }
+
+    // Build Set of recipient IDs according to strict hierarchy rules (no duplicates)
+    const recipientsToNotify = new Set();
+    const isSenderHead = senderIdStr === teamOwnerId;
+    const isSenderCaseOwner = senderIdStr === caseOwnerId;
+    const isSenderIntermediate = intermediateOwnerId && senderIdStr === intermediateOwnerId;
+
+    if (isSenderHead) {
+      // Head -> Junior: notify Junior AND Junior's Intermediate/team owner if available.
+      // Head -> Intermediate: notify Intermediate.
+      if (targetRecipientId) {
+        recipientsToNotify.add(String(targetRecipientId));
+      } else if (caseOwnerId && caseOwnerId !== senderIdStr) {
+        recipientsToNotify.add(caseOwnerId);
+      }
+      if (intermediateOwnerId && intermediateOwnerId !== senderIdStr) {
+        recipientsToNotify.add(intermediateOwnerId);
+      }
+    } else if (isSenderIntermediate) {
+      // Intermediate -> Head: notify Head.
+      // Intermediate -> Junior: notify Junior.
+      if (targetRecipientId) {
+        recipientsToNotify.add(String(targetRecipientId));
+      } else if (caseOwnerId && caseOwnerId !== senderIdStr) {
+        recipientsToNotify.add(caseOwnerId);
+      } else if (teamOwnerId && teamOwnerId !== senderIdStr) {
+        recipientsToNotify.add(teamOwnerId);
+      }
+    } else if (isSenderCaseOwner) {
+      // Junior -> Intermediate: notify Intermediate ONLY (do NOT notify Head).
+      // Junior -> Head: notify Head ONLY when Head is directly involved / intended recipient (e.g. no Intermediate).
+      if (intermediateOwnerId && intermediateOwnerId !== senderIdStr) {
+        recipientsToNotify.add(intermediateOwnerId);
+      } else if (teamOwnerId && teamOwnerId !== senderIdStr) {
+        recipientsToNotify.add(teamOwnerId);
+      }
+    } else {
+      // Junior -> Junior: notify relevant lawyer involved in case
+      if (targetRecipientId && String(targetRecipientId) !== senderIdStr) {
+        recipientsToNotify.add(String(targetRecipientId));
+      }
+    }
+
+    // Ensure sender is never notified for their own message
+    recipientsToNotify.delete(senderIdStr);
+
+    const teamIdStr = team?._id ? String(team._id) : 'personal';
+    const caseIdStr = String(legalCase._id);
+
+    for (const recipientId of recipientsToNotify) {
+      await createNotification({
+        recipient: recipientId,
+        actor: req.user._id,
+        type: 'case_chat_message',
+        title: 'New case chat message',
+        message: `${getDisplayName(req.user, 'A lawyer')} sent a message on case: ${legalCase.title || legalCase.caseName || 'Case'}`,
+        link: `/lawyer-dash?section=team&teamId=${teamIdStr}&caseId=${caseIdStr}&openChat=true`,
+        metadata: { caseId: caseIdStr, teamId: teamIdStr, openChat: true, messageId: createdMsg._id, senderId: req.user._id },
+        io,
+      }).catch((err) => console.error('Notification error:', err));
+    }
+
+    res.status(201).json({ success: true, message: formattedMsg });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ message: error.message });
+  }
 };

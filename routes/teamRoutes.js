@@ -25,5 +25,7 @@ router.get('/:teamId/next-hearings', teamController.getNextHearings);
 router.post('/:teamId/cases/:caseId/hearings', teamController.createHearing);
 router.patch('/:teamId/cases/:caseId/hearings/:hearingId', teamController.updateHearing);
 router.delete('/:teamId/cases/:caseId/hearings/:hearingId', teamController.deleteHearing);
+router.get('/:teamId/cases/:caseId/messages', teamController.getCaseMessages);
+router.post('/:teamId/cases/:caseId/messages', teamController.sendCaseMessage);
 
 module.exports = router;
