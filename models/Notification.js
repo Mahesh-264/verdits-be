@@ -35,6 +35,7 @@ const notificationSchema = new mongoose.Schema(
         'team_join_accepted',
         'team_join_rejected',
         'team_member_removed',
+        'case_chat_message',
         'system',
       ],
       default: 'system',
