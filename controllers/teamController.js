@@ -1325,11 +1325,73 @@ exports.sendCaseMessage = async (req, res) => {
       }
     }
 
-    if (targetRecipientId && String(targetRecipientId) !== senderIdStr) {
-      const teamIdStr = team?._id ? String(team._id) : 'personal';
-      const caseIdStr = String(legalCase._id);
+    // Determine Intermediate Lawyer for Junior / Case Owner if available
+    let intermediateOwnerId = null;
+    if (team && caseOwnerId) {
+      if (legalCase.supervisorId && String(legalCase.supervisorId) !== caseOwnerId && String(legalCase.supervisorId) !== teamOwnerId) {
+        intermediateOwnerId = String(legalCase.supervisorId);
+      } else {
+        const memberRecord = await TeamMember.findOne({ teamId: team._id, userId: caseOwnerId, status: 'active' }).lean();
+        if (memberRecord && memberRecord.addedBy) {
+          const addedById = String(memberRecord.addedBy);
+          if (addedById !== caseOwnerId && addedById !== teamOwnerId) {
+            intermediateOwnerId = addedById;
+          }
+        }
+      }
+    }
+
+    // Build Set of recipient IDs according to strict hierarchy rules (no duplicates)
+    const recipientsToNotify = new Set();
+    const isSenderHead = senderIdStr === teamOwnerId;
+    const isSenderCaseOwner = senderIdStr === caseOwnerId;
+    const isSenderIntermediate = intermediateOwnerId && senderIdStr === intermediateOwnerId;
+
+    if (isSenderHead) {
+      // Head -> Junior: notify Junior AND Junior's Intermediate/team owner if available.
+      // Head -> Intermediate: notify Intermediate.
+      if (targetRecipientId) {
+        recipientsToNotify.add(String(targetRecipientId));
+      } else if (caseOwnerId && caseOwnerId !== senderIdStr) {
+        recipientsToNotify.add(caseOwnerId);
+      }
+      if (intermediateOwnerId && intermediateOwnerId !== senderIdStr) {
+        recipientsToNotify.add(intermediateOwnerId);
+      }
+    } else if (isSenderIntermediate) {
+      // Intermediate -> Head: notify Head.
+      // Intermediate -> Junior: notify Junior.
+      if (targetRecipientId) {
+        recipientsToNotify.add(String(targetRecipientId));
+      } else if (caseOwnerId && caseOwnerId !== senderIdStr) {
+        recipientsToNotify.add(caseOwnerId);
+      } else if (teamOwnerId && teamOwnerId !== senderIdStr) {
+        recipientsToNotify.add(teamOwnerId);
+      }
+    } else if (isSenderCaseOwner) {
+      // Junior -> Intermediate: notify Intermediate ONLY (do NOT notify Head).
+      // Junior -> Head: notify Head ONLY when Head is directly involved / intended recipient (e.g. no Intermediate).
+      if (intermediateOwnerId && intermediateOwnerId !== senderIdStr) {
+        recipientsToNotify.add(intermediateOwnerId);
+      } else if (teamOwnerId && teamOwnerId !== senderIdStr) {
+        recipientsToNotify.add(teamOwnerId);
+      }
+    } else {
+      // Junior -> Junior: notify relevant lawyer involved in case
+      if (targetRecipientId && String(targetRecipientId) !== senderIdStr) {
+        recipientsToNotify.add(String(targetRecipientId));
+      }
+    }
+
+    // Ensure sender is never notified for their own message
+    recipientsToNotify.delete(senderIdStr);
+
+    const teamIdStr = team?._id ? String(team._id) : 'personal';
+    const caseIdStr = String(legalCase._id);
+
+    for (const recipientId of recipientsToNotify) {
       await createNotification({
-        recipient: targetRecipientId,
+        recipient: recipientId,
         actor: req.user._id,
         type: 'case_chat_message',
         title: 'New case chat message',
