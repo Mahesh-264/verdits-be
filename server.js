@@ -190,6 +190,10 @@ app.use((req, res, next) => {
     next();
 });
 
+app.get("/health", (req, res) => {
+    res.status(200).send("Backend is running 🚀");
+});
+
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/posts', require('./routes/postsRoutes'));
 app.use('/api/ai', require('./routes/aiRoutes'));
@@ -206,6 +210,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
+
 server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
         console.error(`Port ${PORT} is already in use. Stop the running backend process or set a different PORT in .env.`);
@@ -215,9 +220,11 @@ server.on('error', (error) => {
     console.error('Server failed to start:', error);
     process.exit(1);
 });
+
 connectDB().then(async () => {
     await seedAdminUser();
-    server.listen(PORT, () => {
+
+    server.listen(PORT, "0.0.0.0", () => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📡 Socket.io engine ready for Real-time Chat`);
     });
