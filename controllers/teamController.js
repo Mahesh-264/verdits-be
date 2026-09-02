@@ -471,7 +471,7 @@ exports.requestToJoin = async (req, res) => {
     const teamCode = trim(req.body.teamCode).toUpperCase();
     if (!teamCode) throw domainError(400, 'Team code is required');
     const team = await Team.findOne({ teamCode, status: 'active' }).lean();
-    if (!team) throw domainError(404, 'Team not found');
+    if (!team) throw domainError(404, 'Team does not exist');
     if (String(team.ownerId || team.owner) === String(req.user._id)) throw domainError(400, 'You already own this team');
     const result = await runInTransaction(async (session) => {
       const member = await TeamMember.findOne({ teamId: team._id, userId: req.user._id, status: 'active' }).session(session);
@@ -488,7 +488,12 @@ exports.requestToJoin = async (req, res) => {
     const teamOwnerId = team.ownerId || team.owner;
     await createNotification({ recipient: teamOwnerId, actor: req.user._id, type: 'team_join_request', title: 'New team join request', message: `${getDisplayName(req.user)} requested to join ${team.firmName}.`, link: `/lawyer-dash?section=team&teamId=${team._id}`, metadata: { teamId: team._id, requestId: result._id }, io: req.app.get('socketio') });
     emitTeamEvent({ io: req.app.get('socketio'), recipientIds: [teamOwnerId], event: 'team:join-request-created', teamId: team._id, payload: { requestId: String(result._id) } });
-    res.status(202).json({ message: 'Join request sent to the Team Owner', requestPending: true, requestId: result._id });
+    res.status(202).json({
+      message: `Join request sent to "${team.firmName || 'this team'}"`,
+      requestPending: true,
+      requestId: result._id,
+      teamName: team.firmName || 'this team',
+    });
   } catch (error) { res.status(error.statusCode || 500).json({ message: error.message }); }
 };
 
