@@ -889,17 +889,10 @@ exports.register = async (req, res) => {
       { status: 409, field: duplicate.email === email ? 'email' : 'phone' }
     );
 
-    const [emailVerification, phoneVerification] = await Promise.all([
-      findVerifiedContact({ channel: 'email', target: email, role }),
-      findVerifiedContact({ channel: 'phone', target: phone, role }),
-    ]);
+    const emailVerification = await findVerifiedContact({ channel: 'email', target: email, role });
 
     if (!emailVerification) {
       throw authError(AUTH_CODES.EMAIL_NOT_VERIFIED, 'Please verify your email address before creating an account.', { status: 403, field: 'email' });
-    }
-
-    if (!phoneVerification) {
-      throw authError(AUTH_CODES.PHONE_NOT_VERIFIED, 'Please verify your phone number before creating an account.', { status: 403, field: 'phone' });
     }
 
     const userData = {
@@ -1110,7 +1103,6 @@ exports.login = async (req, res) => {
       }
 
       if (authenticatedUser.emailVerified === false || authenticatedUser.verified === false) throw authError(AUTH_CODES.EMAIL_NOT_VERIFIED, 'Please verify your email address before logging in.', { status: 403, field: 'email' });
-      if (authenticatedUser.phoneVerified === false) throw authError(AUTH_CODES.PHONE_NOT_VERIFIED, 'Please verify your phone number before logging in.', { status: 403, field: 'phone' });
       if (!authenticatedUser.password || !(await authenticatedUser.matchPassword(password))) throw authError(AUTH_CODES.WRONG_PASSWORD, 'Incorrect password.', { status: 401, field: 'password' });
     }
 
@@ -1401,11 +1393,6 @@ exports.googleAuth = async (req, res) => {
       resolvedLocation = await resolveLawyerAddress(req.body.address || {}, {
         requireCoordinates: hasManualLocationInput(req.body.address || {}),
       });
-    }
-
-    const phoneVerification = await findVerifiedContact({ channel: 'phone', target: phone, role });
-    if (!phoneVerification) {
-      return res.status(400).json({ message: 'Mobile number must be verified before creating an account' });
     }
 
     const userData = {
