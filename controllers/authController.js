@@ -74,7 +74,7 @@ const createLawyerVerificationToken = (verificationRequest) => jwt.sign(
   { expiresIn: '30d' }
 );
 
-const sendLawyerVerificationCreated = (res, verificationRequest) => {
+const sendLawyerVerificationCreated = (res, verificationRequest, statusCode = 201) => {
   const user = {
     _id: verificationRequest._id,
     id: verificationRequest._id,
@@ -90,7 +90,7 @@ const sendLawyerVerificationCreated = (res, verificationRequest) => {
     },
   };
 
-  return sendAuthSuccess(res, 201, {
+  return sendAuthSuccess(res, statusCode, {
     code: 'LAWYER_VERIFICATION_PENDING',
     message: 'Lawyer registration submitted for verification.',
     user,
@@ -963,12 +963,18 @@ exports.getLawyerVerificationStatus = async (req, res) => {
       : '';
     const payload = jwt.verify(token, process.env.JWT_SECRET);
 
-    if (payload.type !== 'lawyer-verification-status' || !payload.email) {
+    if (payload.type !== 'lawyer-verification-status' || !payload.email || !payload.requestId) {
       return res.status(401).json({ message: 'Invalid verification status session.' });
     }
 
     const email = normalizeEmail(payload.email);
-    const verificationRequest = await LawyerVerificationRequest.findOne({ email }).lean();
+    // The token is bound to both the request ID and the normalized email.
+    // This prevents one lawyer's browser session from reading another
+    // lawyer's request when more than one request has the same email history.
+    const verificationRequest = await LawyerVerificationRequest.findOne({
+      _id: payload.requestId,
+      email,
+    }).lean();
     if (verificationRequest) {
       return res.json({
         status: verificationRequest.status,
@@ -1078,7 +1084,7 @@ exports.login = async (req, res) => {
         if (verificationRequest.status === 'rejected') {
           throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer registration has been rejected.', { status: 403 });
         }
-        throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer account is awaiting verification.', { status: 403 });
+        return sendLawyerVerificationCreated(res, verificationRequest, 200);
       } else {
         throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
       }
@@ -1093,9 +1099,13 @@ exports.login = async (req, res) => {
       if (accountStatus === 'deleted') throw authError(AUTH_CODES.ACCOUNT_NOT_FOUND, 'Invalid email or password.', { status: 404, field: 'email' });
 
       if (authenticatedUser.role === 'lawyer' && accountStatus === 'pending_approval') {
+        const verificationRequest = await LawyerVerificationRequest.findOne({ email });
+        if (verificationRequest) return sendLawyerVerificationCreated(res, verificationRequest, 200);
         throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer account is awaiting verification.', { status: 403 });
       }
       if (authenticatedUser.role === 'lawyer' && accountStatus === 'rejected') {
+        const verificationRequest = await LawyerVerificationRequest.findOne({ email });
+        if (verificationRequest) return sendLawyerVerificationCreated(res, verificationRequest, 200);
         throw authError(AUTH_CODES.ACCOUNT_PENDING_APPROVAL, 'Your lawyer registration has been rejected.', { status: 403 });
       }
       if (authenticatedUser.role !== 'lawyer' && accountStatus === 'pending_approval') {
@@ -1929,12 +1939,15 @@ exports.updateProfile = async (req, res) => {
 
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Update Basic Fields
-    if (requestBody.firstName) user.firstName = trimString(requestBody.firstName);
-    if (requestBody.lastName) user.lastName = trimString(requestBody.lastName);
+    // A lawyer's registered identity and Bar Council details are immutable
+    // after registration. Ignore those values even when a caller crafts the
+    // request manually; administrators retain their separate approval flow.
+    const isLawyer = user.role === 'lawyer';
+    if (!isLawyer && requestBody.firstName) user.firstName = trimString(requestBody.firstName);
+    if (!isLawyer && requestBody.lastName) user.lastName = trimString(requestBody.lastName);
     if (requestBody.email) user.email = trimString(requestBody.email);
     if (requestBody.age) user.age = requestBody.age;
-    if (requestBody.gender) user.gender = requestBody.gender;
+    if (!isLawyer && requestBody.gender) user.gender = requestBody.gender;
 
     // Update Address (Merge existing with new)
     const addressPayload = parseMultipartJson(requestBody.address, {});
@@ -1953,8 +1966,8 @@ exports.updateProfile = async (req, res) => {
     }
 
     // Update Lawyer Specifics
-    if (requestBody.lawyerProfile && user.role === 'lawyer') {
-      const normalizedLawyerProfile = { ...requestBody.lawyerProfile };
+    if (requestBody.lawyerProfile && isLawyer) {
+      const normalizedLawyerProfile = { ...parseMultipartJson(requestBody.lawyerProfile, {}) };
 
       if (normalizedLawyerProfile.languages !== undefined) {
         normalizedLawyerProfile.languages = normalizeLanguageList(normalizedLawyerProfile.languages);
@@ -1964,9 +1977,9 @@ exports.updateProfile = async (req, res) => {
         normalizedLawyerProfile.specialization = trimString(normalizedLawyerProfile.specialization);
       }
 
-      if (normalizedLawyerProfile.barId !== undefined) {
-        normalizedLawyerProfile.barId = trimString(normalizedLawyerProfile.barId);
-      }
+      // Never accept a Bar Council identifier from the lawyer profile API.
+      delete normalizedLawyerProfile.barId;
+      delete normalizedLawyerProfile.barEnrollmentNumber;
 
       if (normalizedLawyerProfile.about !== undefined) {
         normalizedLawyerProfile.about = trimString(normalizedLawyerProfile.about);
@@ -1983,7 +1996,6 @@ exports.updateProfile = async (req, res) => {
       user.lawyerProfile = {
         ...user.lawyerProfile,
         ...normalizedLawyerProfile,
-        isVerified: false,
       };
     }
 
